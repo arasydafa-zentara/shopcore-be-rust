@@ -1,0 +1,9 @@
+# Local development: run only db + bank in Docker, run the service on the host with `cargo run`.
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d db bank
+services:
+  db:
+    ports:
+      - "5432:5432"
+  bank:
+    environment:
+      APP_URL: http://host.docker.internal:8000

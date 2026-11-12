@@ -1,0 +1,3 @@
+#!/bin/sh
+# Maintenance entry point, equivalent to the legacy `python manage.py <command>`.
+exec /usr/local/bin/shopcore manage "$@"

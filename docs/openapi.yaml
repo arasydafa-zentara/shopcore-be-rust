@@ -1,0 +1,575 @@
+openapi: 3.0.3
+info:
+  title: ShopCore API
+  version: 1.4.2
+  description: |
+    Order, wallet and reporting backend for the storefront.
+
+    Conventions:
+    - Every error response (status 400 and above) is a JSON object `{"error": "<message>"}`.
+    - Routes marked with a security requirement return `401` when the bearer token is missing or invalid.
+    - Routes marked (admin) return `403` for a valid token that does not belong to an admin.
+    - Request and response bodies are JSON unless stated otherwise. Extra response fields are allowed.
+servers:
+  - url: http://localhost:8000
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [ok] }
+    Ok:
+      type: object
+      required: [ok]
+      properties:
+        ok: { type: boolean, enum: [true] }
+    Token:
+      type: object
+      required: [token]
+      properties:
+        token: { type: string, minLength: 1 }
+    Registered:
+      type: object
+      required: [id, username]
+      properties:
+        id: { type: integer }
+        username: { type: string }
+    Balance:
+      type: object
+      required: [balance]
+      properties:
+        balance: { type: number }
+    User:
+      type: object
+      required: [id, username, email, name, role, wallet_balance]
+      properties:
+        id: { type: integer }
+        username: { type: string }
+        email: { type: string }
+        name: { type: string }
+        role: { type: string, enum: [user, admin] }
+        wallet_balance: { type: number }
+    AdminUser:
+      type: object
+      required: [id, username, email, name, role, wallet_balance, created_at]
+      properties:
+        id: { type: integer }
+        username: { type: string }
+        email: { type: string }
+        name: { type: string }
+        role: { type: string, enum: [user, admin] }
+        wallet_balance: { type: number }
+        created_at: { type: string }
+    RoleChange:
+      type: object
+      required: [id, username, role]
+      properties:
+        id: { type: integer }
+        username: { type: string }
+        role: { type: string }
+    Product:
+      type: object
+      required: [id, sku, name, price, stock, created_at]
+      properties:
+        id: { type: integer }
+        sku: { type: string }
+        name: { type: string }
+        price: { type: number }
+        stock: { type: integer }
+        created_at: { type: string }
+    OrderItem:
+      type: object
+      required: [product_id, sku, name, quantity, price]
+      properties:
+        product_id: { type: integer }
+        sku: { type: string }
+        name: { type: string }
+        quantity: { type: integer }
+        price: { type: number }
+    Order:
+      type: object
+      required: [id, order_no, user_id, status, total, paid_amount, refunded, coupon, created_at, items]
+      properties:
+        id: { type: integer }
+        order_no: { type: integer }
+        user_id: { type: integer }
+        status: { type: string, enum: [pending, paid, shipped, cancelled, refunded] }
+        total: { type: number }
+        paid_amount: { type: number }
+        refunded: { type: number }
+        coupon: { type: string, nullable: true }
+        created_at: { type: string }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/OrderItem" }
+    OrderStatus:
+      type: object
+      required: [id, order_no, status]
+      properties:
+        id: { type: integer }
+        order_no: { type: integer }
+        status: { type: string }
+    InvoiceLine:
+      type: object
+      required: [sku, name, quantity, price, line_total]
+      properties:
+        sku: { type: string }
+        name: { type: string }
+        quantity: { type: integer }
+        price: { type: number }
+        line_total: { type: number }
+    Invoice:
+      type: object
+      required: [order_no, customer, lines, total, status]
+      properties:
+        order_no: { type: integer }
+        customer:
+          type: object
+          required: [name, email]
+          properties:
+            name: { type: string }
+            email: { type: string }
+        lines:
+          type: array
+          items: { $ref: "#/components/schemas/InvoiceLine" }
+        total: { type: number }
+        status: { type: string }
+    PayResult:
+      type: object
+      required: [order_id, status, method, bank_ref]
+      properties:
+        order_id: { type: integer }
+        status: { type: string, enum: [paid] }
+        method: { type: string, enum: [wallet, bank] }
+        bank_ref: { type: string, nullable: true, description: Set when method is bank, null for wallet payments }
+    SalesReport:
+      type: object
+      required: [from, to, group_by, buckets, top_products]
+      properties:
+        from: { type: string }
+        to: { type: string }
+        group_by: { type: string }
+        buckets:
+          type: array
+          items:
+            type: object
+            required: [bucket, orders, revenue]
+            properties:
+              bucket: { type: string, description: "A date (YYYY-MM-DD) for day, the status for status, the user id for user" }
+              orders: { type: integer }
+              revenue: { type: number }
+        top_products:
+          type: array
+          maxItems: 10
+          items:
+            type: object
+            required: [name, revenue]
+            properties:
+              name: { type: string }
+              revenue: { type: number }
+    ExportResult:
+      type: object
+      required: [file]
+      properties:
+        file: { type: string }
+security:
+  - bearer: []
+paths:
+  /health:
+    get:
+      security: []
+      summary: Liveness probe
+      responses:
+        "200":
+          description: Service is up
+          content: { application/json: { schema: { $ref: "#/components/schemas/Health" } } }
+  /api/register:
+    post:
+      security: []
+      summary: Create an account (role user, wallet 0)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, email, password]
+              properties:
+                username: { type: string }
+                email: { type: string }
+                password: { type: string }
+                name: { type: string, description: Defaults to the username }
+      responses:
+        "201":
+          description: Created
+          content: { application/json: { schema: { $ref: "#/components/schemas/Registered" } } }
+        "400": { description: A required field is missing }
+        "409": { description: Username or email already taken }
+  /api/login:
+    post:
+      security: []
+      summary: Exchange credentials for a bearer token
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                username: { type: string }
+                password: { type: string }
+      responses:
+        "200":
+          description: Token
+          content: { application/json: { schema: { $ref: "#/components/schemas/Token" } } }
+        "401": { description: Invalid credentials }
+  /api/logout:
+    post:
+      summary: End the session
+      responses:
+        "200":
+          description: Logged out
+          content: { application/json: { schema: { $ref: "#/components/schemas/Ok" } } }
+  /api/users/me:
+    get:
+      summary: Current user
+      responses:
+        "200":
+          description: User
+          content: { application/json: { schema: { $ref: "#/components/schemas/User" } } }
+    patch:
+      summary: Update profile (name, email)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                email: { type: string }
+      responses:
+        "200":
+          description: Updated user
+          content: { application/json: { schema: { $ref: "#/components/schemas/User" } } }
+  /api/products:
+    get:
+      security: []
+      summary: List products
+      parameters:
+        - { name: q, in: query, schema: { type: string }, description: Case-insensitive name search }
+        - { name: sort, in: query, schema: { type: string, enum: [id, name, price, stock, sku], default: id }, description: Ascending order }
+        - { name: page, in: query, schema: { type: integer, default: 1 } }
+        - { name: limit, in: query, schema: { type: integer, default: 20 } }
+      responses:
+        "200":
+          description: Array of products
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Product" } } } }
+    post:
+      summary: Create product (admin)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                sku: { type: string }
+                name: { type: string }
+                price: { type: number }
+                stock: { type: integer }
+      responses:
+        "201":
+          description: Created product
+          content: { application/json: { schema: { $ref: "#/components/schemas/Product" } } }
+        "403": { description: Not an admin }
+  /api/products/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer } }
+    get:
+      security: []
+      summary: Get product
+      responses:
+        "200":
+          description: Product
+          content: { application/json: { schema: { $ref: "#/components/schemas/Product" } } }
+        "404": { description: Not found }
+    put:
+      summary: Update product (admin). Fields that are omitted keep their value.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                sku: { type: string }
+                name: { type: string }
+                price: { type: number }
+                stock: { type: integer }
+      responses:
+        "200":
+          description: Updated product
+          content: { application/json: { schema: { $ref: "#/components/schemas/Product" } } }
+        "403": { description: Not an admin }
+        "404": { description: Not found }
+  /api/orders:
+    post:
+      summary: Place an order for the current user (status pending, stock is reserved)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      product_id: { type: integer }
+                      quantity: { type: integer, default: 1 }
+                coupon: { type: string }
+                notify_url: { type: string, description: "Receives a POST {order_id, order_no, status} when the order is created (pending) and when it is paid" }
+      responses:
+        "201":
+          description: Order
+          content: { application/json: { schema: { $ref: "#/components/schemas/Order" } } }
+        "400": { description: Empty items, unknown coupon or expired coupon }
+        "404": { description: Unknown product }
+        "409": { description: Insufficient stock or coupon already used }
+    get:
+      summary: List the current user's orders, newest first
+      parameters:
+        - { name: page, in: query, schema: { type: integer, default: 1 } }
+        - { name: limit, in: query, schema: { type: integer, default: 20 } }
+      responses:
+        "200":
+          description: Array of orders with items
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Order" } } } }
+  /api/orders/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer } }
+    get:
+      summary: Get an order
+      responses:
+        "200":
+          description: Order
+          content: { application/json: { schema: { $ref: "#/components/schemas/Order" } } }
+        "404": { description: Not found }
+  /api/orders/{id}/invoice:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer } }
+    get:
+      summary: Invoice for an order
+      responses:
+        "200":
+          description: Invoice
+          content: { application/json: { schema: { $ref: "#/components/schemas/Invoice" } } }
+        "404": { description: Not found }
+  /api/orders/{id}/pay:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer } }
+    post:
+      summary: Pay a pending order from the wallet or through the bank
+      description: |
+        A bank payment sends one charge `{order_id, amount}` to the bank, where amount is the order total.
+        The bank later calls `POST /api/webhooks/bank` to settle it.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                method: { type: string, enum: [wallet, bank], default: wallet }
+      responses:
+        "200":
+          description: Paid
+          content: { application/json: { schema: { $ref: "#/components/schemas/PayResult" } } }
+        "400": { description: Unknown method }
+        "402": { description: Insufficient wallet balance }
+        "404": { description: Not found }
+        "409": { description: Order is not pending }
+        "502": { description: The bank did not accept the charge }
+  /api/orders/{id}/cancel:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer } }
+    post:
+      summary: Cancel an order, return its stock and credit the wallet with the total if it was paid
+      responses:
+        "200":
+          description: Cancelled order
+          content: { application/json: { schema: { $ref: "#/components/schemas/Order" } } }
+        "404": { description: Not found }
+        "409": { description: Already cancelled }
+  /api/orders/{id}/refund:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer } }
+    post:
+      summary: Refund to the wallet (the full total unless amount is given)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                amount: { type: number }
+      responses:
+        "200":
+          description: Refunded order (status refunded, refunded field holds the amount returned)
+          content: { application/json: { schema: { $ref: "#/components/schemas/Order" } } }
+        "404": { description: Not found }
+        "409": { description: Order is still pending }
+  /api/wallet:
+    get:
+      summary: Wallet balance
+      responses:
+        "200":
+          description: Balance
+          content: { application/json: { schema: { $ref: "#/components/schemas/Balance" } } }
+  /api/wallet/topup:
+    post:
+      summary: Add funds
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                amount: { type: number }
+      responses:
+        "200":
+          description: New balance
+          content: { application/json: { schema: { $ref: "#/components/schemas/Balance" } } }
+  /api/wallet/transfer:
+    post:
+      summary: Send funds to another user
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                to_user_id: { type: integer }
+                amount: { type: number }
+      responses:
+        "200":
+          description: The sender's new balance
+          content: { application/json: { schema: { $ref: "#/components/schemas/Balance" } } }
+        "402": { description: Insufficient balance }
+        "404": { description: Recipient not found }
+  /api/reports/sales:
+    get:
+      summary: Sales buckets and top products (admin)
+      description: Top products are ranked by revenue from orders that are paid or shipped.
+      parameters:
+        - { name: from, in: query, schema: { type: string, example: "2026-01-01" }, description: Inclusive lower bound on the order date }
+        - { name: to, in: query, schema: { type: string, example: "2026-12-31" }, description: Exclusive upper bound on the order date }
+        - { name: group_by, in: query, schema: { type: string, enum: [day, status, user], default: day } }
+      responses:
+        "200":
+          description: Report
+          content: { application/json: { schema: { $ref: "#/components/schemas/SalesReport" } } }
+        "403": { description: Not an admin }
+  /api/reports/export:
+    post:
+      summary: Write all sales lines to a gzipped CSV (admin)
+      description: |
+        The CSV has the header `order_no,date,status,user,product,qty,price` and one line per order item.
+        The response names the file, which is `<filename>.gz`.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                filename: { type: string, default: sales.csv }
+                from: { type: string }
+                to: { type: string }
+      responses:
+        "200":
+          description: File written
+          content: { application/json: { schema: { $ref: "#/components/schemas/ExportResult" } } }
+        "403": { description: Not an admin }
+  /api/reports/download:
+    get:
+      summary: Download an exported file (admin)
+      parameters:
+        - { name: file, in: query, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: The gzip file, content type application/gzip
+          content: { application/gzip: { schema: { type: string, format: binary } } }
+        "403": { description: Not an admin }
+        "404": { description: Not found }
+  /api/admin/users:
+    get:
+      summary: List users (admin)
+      responses:
+        "200":
+          description: Array of users
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/AdminUser" } } } }
+        "403": { description: Not an admin }
+  /api/admin/users/{id}/role:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer } }
+    post:
+      summary: Change a user's role (admin)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                role: { type: string, enum: [user, admin] }
+      responses:
+        "200":
+          description: Updated user
+          content: { application/json: { schema: { $ref: "#/components/schemas/RoleChange" } } }
+        "403": { description: Not an admin }
+        "404": { description: Not found }
+  /api/admin/orders/{id}/status:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer } }
+    post:
+      summary: Set an order's status, for example to shipped (admin)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status: { type: string }
+      responses:
+        "200":
+          description: Updated order
+          content: { application/json: { schema: { $ref: "#/components/schemas/OrderStatus" } } }
+        "403": { description: Not an admin }
+        "404": { description: Not found }
+  /api/webhooks/bank:
+    post:
+      security: []
+      summary: Settlement callback from the bank
+      description: |
+        Signed with HMAC-SHA256 (hex digest) of the raw request body, sent in the `X-Signature` header.
+        A `settled` event marks the payment settled and moves a pending order to paid.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                order_id: { type: integer }
+                bank_ref: { type: string }
+                status: { type: string, enum: [settled] }
+      responses:
+        "200":
+          description: Accepted
+          content: { application/json: { schema: { $ref: "#/components/schemas/Ok" } } }
+        "401": { description: Bad signature }
