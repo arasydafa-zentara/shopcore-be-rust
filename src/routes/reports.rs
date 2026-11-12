@@ -22,7 +22,11 @@ use crate::{
     util::{JsonBody, py_float, py_str},
 };
 
-pub async fn sales(State(s): State<AppState>, _a: AdminUser, Query(q): Query<HashMap<String, String>>) -> AppResult<Json<Value>> {
+pub async fn sales(
+    State(s): State<AppState>,
+    _a: AdminUser,
+    Query(q): Query<HashMap<String, String>>,
+) -> AppResult<Json<Value>> {
     let d_from = q.get("from").cloned().unwrap_or_else(|| "1970-01-01".into());
     let d_to = q.get("to").cloned().unwrap_or_else(|| "2999-12-31".into());
     let group_by = q.get("group_by").cloned().unwrap_or_else(|| "day".into());
@@ -64,11 +68,7 @@ pub async fn sales(State(s): State<AppState>, _a: AdminUser, Query(q): Query<Has
 
 /// A file name that stays inside the export directory.
 fn safe_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 200
-        && name != "."
-        && name != ".."
-        && !name.contains(['/', '\\', '\0'])
+    !name.is_empty() && name.len() <= 200 && name != "." && name != ".." && !name.contains(['/', '\\', '\0'])
 }
 
 fn csv_field(s: &str) -> String {
@@ -80,7 +80,9 @@ fn csv_field(s: &str) -> String {
 }
 
 pub async fn export(State(s): State<AppState>, _a: AdminUser, JsonBody(data): JsonBody) -> AppResult<Json<Value>> {
-    let filename = py_str(data.get("filename")).filter(|f| !f.is_empty()).unwrap_or_else(|| "sales.csv".into());
+    let filename = py_str(data.get("filename"))
+        .filter(|f| !f.is_empty())
+        .unwrap_or_else(|| "sales.csv".into());
     if !safe_name(&filename) {
         return Err(AppError::bad_request("invalid filename"));
     }
@@ -125,13 +127,25 @@ pub async fn export(State(s): State<AppState>, _a: AdminUser, JsonBody(data): Js
         };
         let g = |i| row.try_get::<Option<String>, _>(i).ok().flatten();
         let line = [
-            row.try_get::<Option<i32>, _>(0).ok().flatten().map(|v| v.to_string()).unwrap_or_else(none),
+            row.try_get::<Option<i32>, _>(0)
+                .ok()
+                .flatten()
+                .map(|v| v.to_string())
+                .unwrap_or_else(none),
             g(1).unwrap_or_else(none),
             g(2).unwrap_or_else(none),
             g(3).unwrap_or_else(none),
             g(4).unwrap_or_else(none),
-            row.try_get::<Option<i32>, _>(5).ok().flatten().map(|v| v.to_string()).unwrap_or_else(none),
-            row.try_get::<Option<f64>, _>(6).ok().flatten().map(py_float).unwrap_or_else(none),
+            row.try_get::<Option<i32>, _>(5)
+                .ok()
+                .flatten()
+                .map(|v| v.to_string())
+                .unwrap_or_else(none),
+            row.try_get::<Option<f64>, _>(6)
+                .ok()
+                .flatten()
+                .map(py_float)
+                .unwrap_or_else(none),
         ]
         .iter()
         .map(|f| csv_field(f))
@@ -148,7 +162,9 @@ pub async fn export(State(s): State<AppState>, _a: AdminUser, JsonBody(data): Js
         let _ = ctx.send(buf).await;
     }
     drop(ctx);
-    let written = writer.await.map_err(|_| AppError::with(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "internal error"))?;
+    let written = writer
+        .await
+        .map_err(|_| AppError::with(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "internal error"))?;
     if let Some(e) = failure {
         let _ = tokio::fs::remove_file(&tmp_path).await;
         return Err(e.into());
@@ -158,14 +174,24 @@ pub async fn export(State(s): State<AppState>, _a: AdminUser, JsonBody(data): Js
     Ok(Json(json!({ "file": format!("{filename}.gz") })))
 }
 
-pub async fn download(State(s): State<AppState>, _a: AdminUser, Query(q): Query<HashMap<String, String>>) -> AppResult<Response> {
+pub async fn download(
+    State(s): State<AppState>,
+    _a: AdminUser,
+    Query(q): Query<HashMap<String, String>>,
+) -> AppResult<Response> {
     let name = q.get("file").cloned().unwrap_or_default();
     // Anything that is not a plain file name (../, absolute paths, ...) simply "does not exist".
     if !safe_name(&name) {
         return Err(AppError::not_found());
     }
-    let bytes = tokio::fs::read(FsPath::new(&s.cfg.export_dir).join(&name)).await.map_err(|_| AppError::not_found())?;
-    Ok(([(header::CONTENT_TYPE, HeaderValue::from_static("application/gzip"))], bytes).into_response())
+    let bytes = tokio::fs::read(FsPath::new(&s.cfg.export_dir).join(&name))
+        .await
+        .map_err(|_| AppError::not_found())?;
+    Ok((
+        [(header::CONTENT_TYPE, HeaderValue::from_static("application/gzip"))],
+        bytes,
+    )
+        .into_response())
 }
 
 #[cfg(test)]

@@ -25,10 +25,16 @@ pub struct Product {
 }
 
 fn select_cols() -> String {
-    format!("SELECT id, sku, name, price, stock, {} AS created_at FROM products", ts("created_at"))
+    format!(
+        "SELECT id, sku, name, price, stock, {} AS created_at FROM products",
+        ts("created_at")
+    )
 }
 
-pub async fn list(State(s): State<AppState>, Query(q): Query<HashMap<String, String>>) -> AppResult<Json<Vec<Product>>> {
+pub async fn list(
+    State(s): State<AppState>,
+    Query(q): Query<HashMap<String, String>>,
+) -> AppResult<Json<Vec<Product>>> {
     // `sort` is an identifier, so it is matched against an allowlist and never concatenated from input.
     let col = match q.get("sort").map(String::as_str).unwrap_or("id") {
         "id" => "id",
@@ -60,7 +66,12 @@ pub async fn list(State(s): State<AppState>, Query(q): Query<HashMap<String, Str
 }
 
 async fn fetch(s: &AppState, id: i32) -> AppResult<Option<Product>> {
-    Ok(sqlx::query_as::<_, Product>(sqlx::AssertSqlSafe(format!("{} WHERE id = $1", select_cols()))).bind(id).fetch_optional(&s.pool).await?)
+    Ok(
+        sqlx::query_as::<_, Product>(sqlx::AssertSqlSafe(format!("{} WHERE id = $1", select_cols())))
+            .bind(id)
+            .fetch_optional(&s.pool)
+            .await?,
+    )
 }
 
 pub async fn get_one(State(s): State<AppState>, Path(id): Path<String>) -> AppResult<Json<Product>> {
@@ -68,14 +79,19 @@ pub async fn get_one(State(s): State<AppState>, Path(id): Path<String>) -> AppRe
     fetch(&s, id).await?.map(Json).ok_or_else(AppError::not_found)
 }
 
-pub async fn create(State(s): State<AppState>, _a: AdminUser, JsonBody(data): JsonBody) -> AppResult<(StatusCode, Json<Product>)> {
-    let (id,): (i32,) = sqlx::query_as("INSERT INTO products (sku, name, price, stock) VALUES ($1, $2, $3, $4) RETURNING id")
-        .bind(py_str(data.get("sku")))
-        .bind(py_str(data.get("name")))
-        .bind(to_money(data.get("price"), 0.0))
-        .bind(to_int(data.get("stock"), 0) as i32)
-        .fetch_one(&s.pool)
-        .await?;
+pub async fn create(
+    State(s): State<AppState>,
+    _a: AdminUser,
+    JsonBody(data): JsonBody,
+) -> AppResult<(StatusCode, Json<Product>)> {
+    let (id,): (i32,) =
+        sqlx::query_as("INSERT INTO products (sku, name, price, stock) VALUES ($1, $2, $3, $4) RETURNING id")
+            .bind(py_str(data.get("sku")))
+            .bind(py_str(data.get("name")))
+            .bind(to_money(data.get("price"), 0.0))
+            .bind(to_int(data.get("stock"), 0) as i32)
+            .fetch_one(&s.pool)
+            .await?;
     let p = fetch(&s, id).await?.ok_or_else(AppError::not_found)?;
     Ok((StatusCode::CREATED, Json(p)))
 }
@@ -88,10 +104,26 @@ pub async fn update(
 ) -> AppResult<Json<Product>> {
     let id = parse_id(&id)?;
     let cur = fetch(&s, id).await?.ok_or_else(AppError::not_found)?;
-    let sku = if data.contains_key("sku") { py_str(data.get("sku")) } else { cur.sku };
-    let name = if data.contains_key("name") { py_str(data.get("name")) } else { cur.name };
-    let price = if data.contains_key("price") { to_money(data.get("price"), 0.0) } else { cur.price.unwrap_or(0.0) };
-    let stock = if data.contains_key("stock") { to_int(data.get("stock"), 0) as i32 } else { cur.stock.unwrap_or(0) };
+    let sku = if data.contains_key("sku") {
+        py_str(data.get("sku"))
+    } else {
+        cur.sku
+    };
+    let name = if data.contains_key("name") {
+        py_str(data.get("name"))
+    } else {
+        cur.name
+    };
+    let price = if data.contains_key("price") {
+        to_money(data.get("price"), 0.0)
+    } else {
+        cur.price.unwrap_or(0.0)
+    };
+    let stock = if data.contains_key("stock") {
+        to_int(data.get("stock"), 0) as i32
+    } else {
+        cur.stock.unwrap_or(0)
+    };
     sqlx::query("UPDATE products SET sku = $1, name = $2, price = $3, stock = $4 WHERE id = $5")
         .bind(sku)
         .bind(name)

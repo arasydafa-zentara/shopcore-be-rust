@@ -1,0 +1,108 @@
+# ShopCore (Rust)
+
+Order, wallet and reporting backend, migrated from the legacy Flask service to Rust
+(axum + sqlx + tokio). Same HTTP API (`docs/openapi.yaml`), same maintenance commands, same bank
+settlement webhook, same database tables.
+
+## Build and run
+
+```
+docker compose up --build        # db (postgres:16) + bank simulator + app on :8000
+```
+
+Starting the app creates the tables, applies the additive migrations and seeds the admin account,
+two coupons and ten products (all idempotent). No manual steps.
+
+## Test
+
+```
+cargo test                       # unit tests (offline) + end-to-end tests
+docker compose up -d --build     # ...start the stack first, otherwise the end-to-end tests are skipped
+BASE_URL=http://localhost:8000 pytest -q tests_legacy   # the original legacy smoke tests, unchanged
+```
+
+## Configuration (environment)
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DATABASE_URL` | `postgresql://shop:shop@localhost:5432/shop` | Postgres |
+| `BANK_URL` | `http://localhost:5001` | bank simulator |
+| `BANK_SECRET` | `bank-shared-secret-2019` | HMAC key of the settlement webhook |
+| `ADMIN_USER` / `ADMIN_PASSWORD` | `admin` / `admin123` | seeded admin (change outside of testing) |
+| `EXPORT_DIR` | `/tmp/exports` | where report exports are written |
+| `PORT` | `8000` | listen port |
+| `DB_MAX_CONNECTIONS` | `20` | pool size |
+| `NOTIFY_BLOCK_PRIVATE` | `false` | `true` refuses `notify_url` targets on private/loopback addresses (set it in production) |
+
+A warning is logged at start if the default admin password, bank secret or open notify policy are in use.
+
+## Maintenance commands
+
+Same commands as `manage.py`, available three ways inside the container:
+
+```
+docker compose exec app manage init-db | seed | purge-sessions
+docker compose exec app manage import-products <csv>
+docker compose exec app manage export-sales <file>
+docker compose exec app ./manage.py seed          # shell wrapper, same thing
+docker compose exec app shopcore manage seed
+```
+
+(`manage.py` is a shell wrapper around the binary: the image contains no Python.)
+
+## Database
+
+The six legacy tables are unchanged. Additive changes, applied automatically at start (`migrations/`):
+`sessions` table, `order_no_seq` sequence, and indexes / unique constraints on `users.username`,
+`users.email`, `orders.order_no` plus lookup indexes. The index step is best effort: on a database that
+already contains duplicates the unique index is skipped with a warning instead of stopping the service.
+The legacy service can still run against the migrated database.
+
+## Behavior that deliberately differs from the legacy service
+
+Security (all were reachable by any caller):
+- Admin routes without a token returned data; now `401` (valid non-admin: `403`).
+- The bank webhook accepted unsigned calls; the signature is now required and compared in constant time.
+- SQL injection via `sort`, `group_by`, `PATCH /users/me` keys and `import-products`; identifiers are allowlisted,
+  values are bound parameters. `PATCH /users/me` only changes `name` and `email` (it let callers set `role` or the balance).
+- Path traversal on report download, and shell injection through the export filename (`gzip` via shell). Filenames must be
+  plain names; gzip is done in-process.
+- Any logged-in user could read, cancel or refund any order and read its invoice. Now only the owner or an admin;
+  everybody else gets `404`.
+- `/api/admin/users` returned password hashes; removed. Errors no longer include stack traces.
+- Passwords: new hashes are argon2id; legacy MD5 hashes still verify and are upgraded on the next login.
+- Sessions are random 256-bit tokens stored hashed in the database: `logout` and `purge-sessions` really revoke them,
+  and they survive a restart (30 day lifetime).
+- The in-memory audit log that kept every request body (including passwords) forever is gone.
+
+Money and consistency (all concurrency bugs in the legacy read-modify-write code):
+- Order creation, stock reservation, coupon use, wallet payment/transfer/top-up, cancel and refund run in transactions with
+  guarded updates: no overselling, no double spend, a failed order leaves no orphan row or leaked stock, a single-use coupon is
+  consumed once, `order_no` comes from a sequence.
+- `amount` values must be positive finite numbers (negative / NaN top-ups and transfers used to mint money); no self-transfer;
+  order quantities must be >= 1. All answered with `400`.
+- Refund: at most `total - refunded` in total, may be done in several parts (default amount = what is left), never on a pending or
+  cancelled order; invalid amount `400`, nothing left `409`.
+- Bank payment: one charge per order. The charge is retried on failure but every attempt carries the same
+  `Idempotency-Key`, so the bank records it once (the legacy retries created duplicate charges). The call has a timeout and is
+  made outside any database transaction. If the settlement webhook arrives before the payment row is written the payment is stored as settled.
+
+Spec conformance:
+- Invalid `sort`, `group_by`, admin `role` and order `status` values are `400` (legacy: SQL error `500` or silently accepted).
+- Sales report is no longer cached forever (it returned stale numbers) and is computed with two SQL aggregates instead of
+  N+1 loops. Order lists load items with one query. `page < 1` is treated as page 1.
+- All errors, including unknown routes (404) and wrong methods (405), are `{"error": ...}`.
+- The webhook's "settled" event also sends the `paid` notify_url callback when it is what moves the order to paid.
+- `import-products` understands quoted CSV, skips SKUs already present, and never builds SQL from file contents.
+
+`notify_url` callbacks: http/https only, no redirects, no embedded credentials, 5 s timeout, link-local addresses (cloud metadata)
+always refused, the connection is pinned to the addresses that were validated. Private/loopback targets are refused only when
+`NOTIFY_BLOCK_PRIVATE=true` (default off to stay compatible with the legacy behavior and local receivers). Events of one order are
+delivered in order (pending, then paid). E-mails were never delivered in the legacy service (an unread in-memory list); they are logged only.
+
+## Known limits / future work
+
+- Timestamps are rendered like Flask did (`Thu, 12 Nov 2026 10:00:00 GMT`, a naive Jakarta wall-clock value for orders).
+- A narrow race remains if an order is cancelled between the bank charge and the payment commit (the charge then needs manual reversal).
+- No rate limiting on login; CSV export does not neutralise spreadsheet formulas.
+- Not done: `cargo vendor` for fully offline builds, a differential test harness against the legacy service.

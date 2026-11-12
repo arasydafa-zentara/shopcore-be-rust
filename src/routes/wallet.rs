@@ -53,7 +53,11 @@ pub async fn transfer(State(s): State<AppState>, user: AuthUser, JsonBody(data):
     if !rows.iter().any(|(id, _)| *id == to_id) {
         return Err(AppError::not_found_with("recipient not found"));
     }
-    let src = rows.iter().find(|(id, _)| *id == user.id).and_then(|(_, b)| *b).unwrap_or(0.0);
+    let src = rows
+        .iter()
+        .find(|(id, _)| *id == user.id)
+        .and_then(|(_, b)| *b)
+        .unwrap_or(0.0);
     if src < amount {
         return Err(AppError::payment_required("insufficient balance"));
     }
@@ -65,11 +69,13 @@ pub async fn transfer(State(s): State<AppState>, user: AuthUser, JsonBody(data):
     .bind(user.id)
     .fetch_one(&mut *tx)
     .await?;
-    sqlx::query("UPDATE users SET wallet_balance = ROUND((COALESCE(wallet_balance, 0) + $1)::numeric, 2)::float8 WHERE id = $2")
-        .bind(amount)
-        .bind(to_id)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "UPDATE users SET wallet_balance = ROUND((COALESCE(wallet_balance, 0) + $1)::numeric, 2)::float8 WHERE id = $2",
+    )
+    .bind(amount)
+    .bind(to_id)
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
     Ok(Json(json!({ "balance": new_bal })))
 }

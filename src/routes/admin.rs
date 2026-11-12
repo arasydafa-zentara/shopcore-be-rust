@@ -34,7 +34,12 @@ pub async fn list_users(State(s): State<AppState>, _a: AdminUser) -> AppResult<J
     Ok(Json(rows))
 }
 
-pub async fn set_role(State(s): State<AppState>, _a: AdminUser, Path(id): Path<String>, JsonBody(data): JsonBody) -> AppResult<Json<Value>> {
+pub async fn set_role(
+    State(s): State<AppState>,
+    _a: AdminUser,
+    Path(id): Path<String>,
+    JsonBody(data): JsonBody,
+) -> AppResult<Json<Value>> {
     let id = parse_id(&id)?;
     let role = match data.get("role") {
         None => "user".to_string(),
@@ -55,7 +60,12 @@ pub async fn set_role(State(s): State<AppState>, _a: AdminUser, Path(id): Path<S
 
 const STATUSES: [&str; 5] = ["pending", "paid", "shipped", "cancelled", "refunded"];
 
-pub async fn set_order_status(State(s): State<AppState>, _a: AdminUser, Path(id): Path<String>, JsonBody(data): JsonBody) -> AppResult<Json<Value>> {
+pub async fn set_order_status(
+    State(s): State<AppState>,
+    _a: AdminUser,
+    Path(id): Path<String>,
+    JsonBody(data): JsonBody,
+) -> AppResult<Json<Value>> {
     let id = parse_id(&id)?;
     let status = py_str(data.get("status")).unwrap_or_default();
     if !STATUSES.contains(&status.as_str()) {

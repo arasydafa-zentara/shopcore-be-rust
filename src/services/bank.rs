@@ -16,14 +16,12 @@ pub async fn charge(state: &AppState, cfg: &Config, order_id: i32, amount: f64, 
             .json(&json!({ "order_id": order_id, "amount": amount }))
             .send()
             .await;
-        if let Ok(r) = res {
-            if r.status().as_u16() == 200 {
-                if let Ok(v) = r.json::<serde_json::Value>().await {
-                    if let Some(s) = v.get("bank_ref").and_then(|x| x.as_str()) {
-                        return Some(s.to_string());
-                    }
-                }
-            }
+        if let Ok(r) = res
+            && r.status().as_u16() == 200
+            && let Ok(v) = r.json::<serde_json::Value>().await
+            && let Some(bank_ref) = v.get("bank_ref").and_then(|x| x.as_str())
+        {
+            return Some(bank_ref.to_string());
         }
         tokio::time::sleep(Duration::from_millis(100 * (attempt + 1))).await;
     }

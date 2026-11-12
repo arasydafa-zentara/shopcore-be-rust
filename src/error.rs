@@ -16,7 +16,10 @@ pub type AppResult<T> = Result<T, AppError>;
 
 impl AppError {
     fn new(status: StatusCode, message: impl Into<String>) -> AppError {
-        AppError { status, message: message.into() }
+        AppError {
+            status,
+            message: message.into(),
+        }
     }
     pub fn bad_request(m: impl Into<String>) -> AppError {
         AppError::new(StatusCode::BAD_REQUEST, m)

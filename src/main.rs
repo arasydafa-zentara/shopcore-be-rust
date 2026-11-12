@@ -1,3 +1,6 @@
+// Rows fetched with `query_as` are plain tuples; naming each one would only add noise.
+#![allow(clippy::type_complexity)]
+
 mod auth;
 mod config;
 mod db;
@@ -39,7 +42,9 @@ enum Cmd {
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,sqlx=warn".into()))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,sqlx=warn".into()),
+        )
         .init();
     let cfg = Config::from_env();
     let code = match Cli::parse().command.unwrap_or(Cmd::Serve) {
@@ -52,7 +57,12 @@ async fn main() {
 
 async fn healthcheck(cfg: &Config) -> i32 {
     let url = format!("http://127.0.0.1:{}/health", cfg.port);
-    match reqwest::Client::new().get(url).timeout(Duration::from_secs(3)).send().await {
+    match reqwest::Client::new()
+        .get(url)
+        .timeout(Duration::from_secs(3))
+        .send()
+        .await
+    {
         Ok(r) if r.status().is_success() => 0,
         _ => 1,
     }
@@ -63,7 +73,9 @@ async fn serve(cfg: Config) -> i32 {
         tracing::warn!("default ADMIN_PASSWORD / BANK_SECRET in use: set your own values outside of testing");
     }
     if !cfg.notify_block_private {
-        tracing::warn!("NOTIFY_BLOCK_PRIVATE is off: notify_url may point at private addresses; enable it in production");
+        tracing::warn!(
+            "NOTIFY_BLOCK_PRIVATE is off: notify_url may point at private addresses; enable it in production"
+        );
     }
     let pool = match db::connect(&cfg).await {
         Ok(p) => p,
@@ -80,10 +92,18 @@ async fn serve(cfg: Config) -> i32 {
         tracing::error!(error = %e, "seeding failed");
         return 1;
     }
-    let http = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().expect("http client");
+    let http = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("http client");
     let notifier = jobs::Notifier::start(&cfg);
     let port = cfg.port;
-    let state = AppState { pool, cfg: Arc::new(cfg), http, notifier };
+    let state = AppState {
+        pool,
+        cfg: Arc::new(cfg),
+        http,
+        notifier,
+    };
     let app = routes::router(state);
     let listener = match tokio::net::TcpListener::bind(("0.0.0.0", port)).await {
         Ok(l) => l,

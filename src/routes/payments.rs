@@ -15,7 +15,12 @@ use crate::{
 
 type OrderRow = (Option<i32>, Option<String>, Option<f64>, Option<String>, Option<String>);
 
-pub async fn pay(State(s): State<AppState>, user: AuthUser, Path(id): Path<String>, JsonBody(data): JsonBody) -> AppResult<Json<Value>> {
+pub async fn pay(
+    State(s): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<String>,
+    JsonBody(data): JsonBody,
+) -> AppResult<Json<Value>> {
     let oid = parse_id(&id)?;
     let method = match data.get("method") {
         None => "wallet".to_string(),
@@ -44,7 +49,12 @@ pub async fn pay(State(s): State<AppState>, user: AuthUser, Path(id): Path<Strin
         "bank" => {
             // Same key for every attempt and every concurrent request on this order: the bank records one
             // charge. The row's number and creation time keep the key unique even if ids are ever reused.
-            let key = format!("shopcore-{}-{}-{}", oid, order_no.unwrap_or_default(), created.unwrap_or_default());
+            let key = format!(
+                "shopcore-{}-{}-{}",
+                oid,
+                order_no.unwrap_or_default(),
+                created.unwrap_or_default()
+            );
             let r = bank::charge(&s, &s.cfg, oid, total, &key)
                 .await
                 .ok_or_else(|| AppError::with(axum::http::StatusCode::BAD_GATEWAY, "payment failed"))?;
@@ -56,13 +66,17 @@ pub async fn pay(State(s): State<AppState>, user: AuthUser, Path(id): Path<Strin
 
     jobs::email(&format!("Payment received for order {}", order_no.unwrap_or_default()));
     s.notifier.order_event(oid, order_no, "paid", notify_url.as_deref());
-    Ok(Json(json!({ "order_id": oid, "status": "paid", "method": method, "bank_ref": bank_ref })))
+    Ok(Json(
+        json!({ "order_id": oid, "status": "paid", "method": method, "bank_ref": bank_ref }),
+    ))
 }
 
 async fn pay_wallet(s: &AppState, user: &AuthUser, oid: i32, total: f64) -> AppResult<()> {
     let mut tx = s.pool.begin().await?;
-    let st: Option<(Option<String>,)> =
-        sqlx::query_as("SELECT status FROM orders WHERE id = $1 FOR UPDATE").bind(oid).fetch_optional(&mut *tx).await?;
+    let st: Option<(Option<String>,)> = sqlx::query_as("SELECT status FROM orders WHERE id = $1 FOR UPDATE")
+        .bind(oid)
+        .fetch_optional(&mut *tx)
+        .await?;
     if st.and_then(|r| r.0).as_deref() != Some("pending") {
         return Err(AppError::conflict("order not payable"));
     }
@@ -78,12 +92,18 @@ async fn pay_wallet(s: &AppState, user: &AuthUser, oid: i32, total: f64) -> AppR
     if debited.rows_affected() == 0 {
         return Err(AppError::payment_required("insufficient wallet balance"));
     }
-    sqlx::query("INSERT INTO payments (order_id, amount, method, bank_ref, status) VALUES ($1, $2, 'wallet', NULL, 'captured')")
-        .bind(oid)
+    sqlx::query(
+        "INSERT INTO payments (order_id, amount, method, bank_ref, status) VALUES ($1, $2, 'wallet', NULL, 'captured')",
+    )
+    .bind(oid)
+    .bind(total)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("UPDATE orders SET status = 'paid', paid_amount = $1 WHERE id = $2")
         .bind(total)
+        .bind(oid)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("UPDATE orders SET status = 'paid', paid_amount = $1 WHERE id = $2").bind(total).bind(oid).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -93,14 +113,18 @@ async fn pay_wallet(s: &AppState, user: &AuthUser, oid: i32, total: f64) -> AppR
 /// that still counts as success and the payment is stored as settled.
 async fn record_bank_payment(s: &AppState, oid: i32, total: f64, bank_ref: &str) -> AppResult<()> {
     let mut tx = s.pool.begin().await?;
-    let st: Option<(Option<String>,)> =
-        sqlx::query_as("SELECT status FROM orders WHERE id = $1 FOR UPDATE").bind(oid).fetch_optional(&mut *tx).await?;
+    let st: Option<(Option<String>,)> = sqlx::query_as("SELECT status FROM orders WHERE id = $1 FOR UPDATE")
+        .bind(oid)
+        .fetch_optional(&mut *tx)
+        .await?;
     let status = st.and_then(|r| r.0);
     let payment_status = match status.as_deref() {
         Some("pending") => "captured",
         Some("paid") => {
-            let (exists,): (bool,) =
-                sqlx::query_as("SELECT EXISTS (SELECT 1 FROM payments WHERE order_id = $1)").bind(oid).fetch_one(&mut *tx).await?;
+            let (exists,): (bool,) = sqlx::query_as("SELECT EXISTS (SELECT 1 FROM payments WHERE order_id = $1)")
+                .bind(oid)
+                .fetch_one(&mut *tx)
+                .await?;
             if exists {
                 return Err(AppError::conflict("order not payable"));
             }
@@ -115,7 +139,11 @@ async fn record_bank_payment(s: &AppState, oid: i32, total: f64, bank_ref: &str)
         .bind(payment_status)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("UPDATE orders SET status = 'paid', paid_amount = $1 WHERE id = $2").bind(total).bind(oid).execute(&mut *tx).await?;
+    sqlx::query("UPDATE orders SET status = 'paid', paid_amount = $1 WHERE id = $2")
+        .bind(total)
+        .bind(oid)
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
     Ok(())
 }

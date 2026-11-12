@@ -8,24 +8,33 @@ use crate::{
     util::{JsonBody, clean, py_str},
 };
 
-pub async fn register(State(s): State<AppState>, JsonBody(data): JsonBody) -> AppResult<(axum::http::StatusCode, Json<Value>)> {
+pub async fn register(
+    State(s): State<AppState>,
+    JsonBody(data): JsonBody,
+) -> AppResult<(axum::http::StatusCode, Json<Value>)> {
     let username = clean(data.get("username"));
     let email = clean(data.get("email"));
     let password = py_str(data.get("password")).unwrap_or_default();
     if username.is_empty() || email.is_empty() || password.is_empty() {
         return Err(AppError::bad_request("username, email and password are required"));
     }
-    let exists: Option<(i32,)> =
-        sqlx::query_as("SELECT id FROM users WHERE username = $1 LIMIT 1").bind(&username).fetch_optional(&s.pool).await?;
+    let exists: Option<(i32,)> = sqlx::query_as("SELECT id FROM users WHERE username = $1 LIMIT 1")
+        .bind(&username)
+        .fetch_optional(&s.pool)
+        .await?;
     if exists.is_some() {
         return Err(AppError::conflict("username taken"));
     }
-    let exists: Option<(i32,)> =
-        sqlx::query_as("SELECT id FROM users WHERE email = $1 LIMIT 1").bind(&email).fetch_optional(&s.pool).await?;
+    let exists: Option<(i32,)> = sqlx::query_as("SELECT id FROM users WHERE email = $1 LIMIT 1")
+        .bind(&email)
+        .fetch_optional(&s.pool)
+        .await?;
     if exists.is_some() {
         return Err(AppError::conflict("email taken"));
     }
-    let name = py_str(data.get("name")).filter(|n| !n.is_empty()).unwrap_or_else(|| username.clone());
+    let name = py_str(data.get("name"))
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| username.clone());
     let hash = tokio::task::spawn_blocking(move || auth::hash_password(&password))
         .await
         .map_err(|_| AppError::with(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "internal error"))?;
@@ -39,17 +48,22 @@ pub async fn register(State(s): State<AppState>, JsonBody(data): JsonBody) -> Ap
     .bind(&hash)
     .fetch_one(&s.pool)
     .await?;
-    Ok((axum::http::StatusCode::CREATED, Json(json!({ "id": id, "username": username }))))
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(json!({ "id": id, "username": username })),
+    ))
 }
 
 pub async fn login(State(s): State<AppState>, JsonBody(data): JsonBody) -> AppResult<Json<Value>> {
     let username = py_str(data.get("username"));
     let password = py_str(data.get("password")).unwrap_or_default();
     let row: Option<(i32, Option<String>)> = match &username {
-        Some(u) => sqlx::query_as("SELECT id, password_hash FROM users WHERE username = $1 ORDER BY id LIMIT 1")
-            .bind(u)
-            .fetch_optional(&s.pool)
-            .await?,
+        Some(u) => {
+            sqlx::query_as("SELECT id, password_hash FROM users WHERE username = $1 ORDER BY id LIMIT 1")
+                .bind(u)
+                .fetch_optional(&s.pool)
+                .await?
+        }
         None => None,
     };
     let Some((uid, stored)) = row else {
@@ -67,7 +81,11 @@ pub async fn login(State(s): State<AppState>, JsonBody(data): JsonBody) -> AppRe
     if upgrade {
         // Legacy MD5 row: transparently move it to argon2id now that we know the password.
         if let Ok(new_hash) = tokio::task::spawn_blocking(move || auth::hash_password(&password)).await {
-            let _ = sqlx::query("UPDATE users SET password_hash = $1 WHERE id = $2").bind(new_hash).bind(uid).execute(&s.pool).await;
+            let _ = sqlx::query("UPDATE users SET password_hash = $1 WHERE id = $2")
+                .bind(new_hash)
+                .bind(uid)
+                .execute(&s.pool)
+                .await;
         }
     }
     let token = auth::new_token();
@@ -84,7 +102,10 @@ fn invalid_credentials() -> AppError {
 }
 
 pub async fn logout(State(s): State<AppState>, user: AuthUser) -> AppResult<Json<Value>> {
-    sqlx::query("DELETE FROM sessions WHERE token_hash = $1").bind(&user.token_hash).execute(&s.pool).await?;
+    sqlx::query("DELETE FROM sessions WHERE token_hash = $1")
+        .bind(&user.token_hash)
+        .execute(&s.pool)
+        .await?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -94,7 +115,11 @@ pub async fn me(user: AuthUser) -> Json<PublicUser> {
 
 /// Only `name` and `email` can be changed here. (The legacy handler built SQL from the JSON keys,
 /// which allowed injection and self-promotion to admin.)
-pub async fn update_me(State(s): State<AppState>, user: AuthUser, JsonBody(data): JsonBody) -> AppResult<Json<PublicUser>> {
+pub async fn update_me(
+    State(s): State<AppState>,
+    user: AuthUser,
+    JsonBody(data): JsonBody,
+) -> AppResult<Json<PublicUser>> {
     if let Some(v) = data.get("email").filter(|v| !v.is_null()) {
         let email = py_str(Some(v)).map(|e| e.trim().to_string()).unwrap_or_default();
         if email.is_empty() {
@@ -108,10 +133,18 @@ pub async fn update_me(State(s): State<AppState>, user: AuthUser, JsonBody(data)
         if taken.is_some() {
             return Err(AppError::conflict("email taken"));
         }
-        sqlx::query("UPDATE users SET email = $1 WHERE id = $2").bind(&email).bind(user.id).execute(&s.pool).await?;
+        sqlx::query("UPDATE users SET email = $1 WHERE id = $2")
+            .bind(&email)
+            .bind(user.id)
+            .execute(&s.pool)
+            .await?;
     }
     if let Some(name) = data.get("name").filter(|v| !v.is_null()).and_then(|v| py_str(Some(v))) {
-        sqlx::query("UPDATE users SET name = $1 WHERE id = $2").bind(&name).bind(user.id).execute(&s.pool).await?;
+        sqlx::query("UPDATE users SET name = $1 WHERE id = $2")
+            .bind(&name)
+            .bind(user.id)
+            .execute(&s.pool)
+            .await?;
     }
     let u = sqlx::query_as::<_, AuthUser>(
         "SELECT id, username, email, name, role, wallet_balance, '' AS token_hash FROM users WHERE id = $1",

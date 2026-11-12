@@ -75,7 +75,10 @@ pub async fn attach_items(pool: &PgPool, orders: &mut [Order]) -> Result<(), sql
 }
 
 pub async fn fetch_order(pool: &PgPool, id: i32) -> Result<Option<Order>, sqlx::Error> {
-    let o = sqlx::query_as::<_, Order>(sqlx::AssertSqlSafe(format!("{} WHERE id = $1", order_select()))).bind(id).fetch_optional(pool).await?;
+    let o = sqlx::query_as::<_, Order>(sqlx::AssertSqlSafe(format!("{} WHERE id = $1", order_select())))
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
     match o {
         Some(o) => {
             let mut v = vec![o];
@@ -95,11 +98,13 @@ async fn visible_order(s: &AppState, user: &AuthUser, id: i32) -> AppResult<Orde
 }
 
 pub async fn credit_wallet(conn: &mut PgConnection, user_id: Option<i32>, amount: f64) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE users SET wallet_balance = ROUND((COALESCE(wallet_balance, 0) + $1)::numeric, 2)::float8 WHERE id = $2")
-        .bind(round2(amount))
-        .bind(user_id)
-        .execute(conn)
-        .await?;
+    sqlx::query(
+        "UPDATE users SET wallet_balance = ROUND((COALESCE(wallet_balance, 0) + $1)::numeric, 2)::float8 WHERE id = $2",
+    )
+    .bind(round2(amount))
+    .bind(user_id)
+    .execute(conn)
+    .await?;
     Ok(())
 }
 
@@ -118,19 +123,29 @@ struct Line {
     qty: i32,
 }
 
-pub async fn create(State(s): State<AppState>, user: AuthUser, JsonBody(data): JsonBody) -> AppResult<(StatusCode, Json<Order>)> {
+pub async fn create(
+    State(s): State<AppState>,
+    user: AuthUser,
+    JsonBody(data): JsonBody,
+) -> AppResult<(StatusCode, Json<Order>)> {
     let raw = match data.get("items") {
         Some(Value::Array(a)) if !a.is_empty() => a,
         _ => return Err(AppError::bad_request("items required")),
     };
     let mut lines = Vec::with_capacity(raw.len());
     for (idx, it) in raw.iter().enumerate() {
-        let Value::Object(o) = it else { return Err(AppError::bad_request("invalid item")) };
+        let Value::Object(o) = it else {
+            return Err(AppError::bad_request("invalid item"));
+        };
         let qty = to_int(o.get("quantity"), 1);
         if !(1..=i32::MAX as i64).contains(&qty) {
             return Err(AppError::bad_request("quantity must be a positive integer"));
         }
-        lines.push(Line { idx, pid: to_int(o.get("product_id"), 0) as i32, qty: qty as i32 });
+        lines.push(Line {
+            idx,
+            pid: to_int(o.get("product_id"), 0) as i32,
+            qty: qty as i32,
+        });
     }
     let coupon_code = py_str(data.get("coupon")).filter(|c| !c.is_empty());
     let notify_url = py_str(data.get("notify_url")).filter(|u| !u.is_empty());
@@ -166,18 +181,19 @@ pub async fn create(State(s): State<AppState>, user: AuthUser, JsonBody(data): J
     order.sort_by_key(|l| (l.pid, l.idx));
     let mut prices = vec![0.0f64; lines.len()];
     for l in order {
-        let row: Option<(Option<f64>,)> = sqlx::query_as(
-            "UPDATE products SET stock = stock - $2 WHERE id = $1 AND stock >= $2 RETURNING price",
-        )
-        .bind(l.pid)
-        .bind(l.qty)
-        .fetch_optional(&mut *tx)
-        .await?;
+        let row: Option<(Option<f64>,)> =
+            sqlx::query_as("UPDATE products SET stock = stock - $2 WHERE id = $1 AND stock >= $2 RETURNING price")
+                .bind(l.pid)
+                .bind(l.qty)
+                .fetch_optional(&mut *tx)
+                .await?;
         match row {
             Some((price,)) => prices[l.idx] = price.unwrap_or(0.0),
             None => {
-                let sku: Option<(Option<String>,)> =
-                    sqlx::query_as("SELECT sku FROM products WHERE id = $1").bind(l.pid).fetch_optional(&mut *tx).await?;
+                let sku: Option<(Option<String>,)> = sqlx::query_as("SELECT sku FROM products WHERE id = $1")
+                    .bind(l.pid)
+                    .fetch_optional(&mut *tx)
+                    .await?;
                 return Err(match sku {
                     None => AppError::not_found_with(format!("product {} not found", l.pid)),
                     Some((sku,)) => AppError::conflict(format!("insufficient stock for {}", sku.unwrap_or_default())),
@@ -227,12 +243,17 @@ pub async fn create(State(s): State<AppState>, user: AuthUser, JsonBody(data): J
     tx.commit().await?;
 
     jobs::email(&format!("Order {order_no} received"));
-    s.notifier.order_event(oid, Some(order_no), "pending", notify_url.as_deref());
+    s.notifier
+        .order_event(oid, Some(order_no), "pending", notify_url.as_deref());
     let o = fetch_order(&s.pool, oid).await?.ok_or_else(AppError::not_found)?;
     Ok((StatusCode::CREATED, Json(o)))
 }
 
-pub async fn list(State(s): State<AppState>, user: AuthUser, Query(q): Query<HashMap<String, String>>) -> AppResult<Json<Vec<Order>>> {
+pub async fn list(
+    State(s): State<AppState>,
+    user: AuthUser,
+    Query(q): Query<HashMap<String, String>>,
+) -> AppResult<Json<Vec<Order>>> {
     let (offset, limit) = paging(q.get("page").map(String::as_str), q.get("limit").map(String::as_str));
     let mut sql = format!("{} WHERE user_id = $1 ORDER BY id DESC", order_select());
     if limit.is_some() {
@@ -255,8 +276,10 @@ pub async fn get_one(State(s): State<AppState>, user: AuthUser, Path(id): Path<S
 pub async fn invoice(State(s): State<AppState>, user: AuthUser, Path(id): Path<String>) -> AppResult<Json<Value>> {
     let id = parse_id(&id)?;
     let o = visible_order(&s, &user, id).await?;
-    let cust: Option<(Option<String>, Option<String>)> =
-        sqlx::query_as("SELECT name, email FROM users WHERE id = $1").bind(o.user_id).fetch_optional(&s.pool).await?;
+    let cust: Option<(Option<String>, Option<String>)> = sqlx::query_as("SELECT name, email FROM users WHERE id = $1")
+        .bind(o.user_id)
+        .fetch_optional(&s.pool)
+        .await?;
     let (name, email) = cust.unwrap_or((None, None));
     let lines: Vec<Value> = o
         .items
@@ -302,13 +325,21 @@ pub async fn cancel(State(s): State<AppState>, user: AuthUser, Path(id): Path<St
     if matches!(status.as_deref(), Some("paid") | Some("shipped")) {
         credit_wallet(&mut tx, owner, total.unwrap_or(0.0)).await?;
     }
-    sqlx::query("UPDATE orders SET status = 'cancelled' WHERE id = $1").bind(id).execute(&mut *tx).await?;
+    sqlx::query("UPDATE orders SET status = 'cancelled' WHERE id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
     jobs::email(&format!("Order {} cancelled", order_no.unwrap_or_default()));
     Ok(Json(fetch_order(&s.pool, id).await?.ok_or_else(AppError::not_found)?))
 }
 
-pub async fn refund(State(s): State<AppState>, user: AuthUser, Path(id): Path<String>, JsonBody(data): JsonBody) -> AppResult<Json<Order>> {
+pub async fn refund(
+    State(s): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<String>,
+    JsonBody(data): JsonBody,
+) -> AppResult<Json<Order>> {
     let id = parse_id(&id)?;
     let mut tx = s.pool.begin().await?;
     let row: Option<(Option<i32>, Option<String>, Option<f64>, Option<f64>)> =

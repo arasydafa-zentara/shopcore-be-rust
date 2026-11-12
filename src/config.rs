@@ -22,7 +22,9 @@ impl Config {
     pub fn from_env() -> Config {
         Config {
             database_url: var("DATABASE_URL", "postgresql://shop:shop@localhost:5432/shop"),
-            bank_url: var("BANK_URL", "http://localhost:5001").trim_end_matches('/').to_string(),
+            bank_url: var("BANK_URL", "http://localhost:5001")
+                .trim_end_matches('/')
+                .to_string(),
             bank_secret: var("BANK_SECRET", "bank-shared-secret-2019"),
             export_dir: var("EXPORT_DIR", "/tmp/exports"),
             admin_user: var("ADMIN_USER", "admin"),

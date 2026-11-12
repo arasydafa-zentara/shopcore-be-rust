@@ -39,7 +39,9 @@ impl Notifier {
     }
 
     pub fn order_event(&self, order_id: i32, order_no: Option<i32>, status: &str, url: Option<&str>) {
-        let Some(url) = url.filter(|u| !u.is_empty()) else { return };
+        let Some(url) = url.filter(|u| !u.is_empty()) else {
+            return;
+        };
         let job = NotifyJob {
             url: url.to_string(),
             body: json!({ "order_id": order_id, "order_no": order_no, "status": status }),
@@ -86,7 +88,9 @@ async fn deliver(job: NotifyJob, block_private: bool) {
         tracing::warn!("notify: url rejected (scheme or credentials)");
         return;
     }
-    let Some(host) = url.host_str().map(str::to_string) else { return };
+    let Some(host) = url.host_str().map(str::to_string) else {
+        return;
+    };
     let port = url.port_or_known_default().unwrap_or(80);
     let addrs: Vec<std::net::SocketAddr> = match tokio::net::lookup_host((host.as_str(), port)).await {
         Ok(a) => a.collect(),

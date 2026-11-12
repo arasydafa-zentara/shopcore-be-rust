@@ -16,7 +16,10 @@ fn bad_signature() -> AppError {
 
 pub async fn bank(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> AppResult<Json<Value>> {
     // The signature is mandatory (legacy accepted unsigned calls) and compared in constant time.
-    let sig = headers.get("x-signature").and_then(|v| v.to_str().ok()).ok_or_else(bad_signature)?;
+    let sig = headers
+        .get("x-signature")
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(bad_signature)?;
     let mut mac = Hmac::<Sha256>::new_from_slice(s.cfg.bank_secret.as_bytes()).map_err(|_| bad_signature())?;
     mac.update(&body);
     let expected = hex::encode(mac.finalize().into_bytes());
@@ -31,16 +34,21 @@ pub async fn bank(State(s): State<AppState>, headers: HeaderMap, body: Bytes) ->
         let mut tx = s.pool.begin().await?;
         // Taking the order lock first makes this wait for an in-flight payment to commit.
         let o: Option<(Option<i32>, Option<String>)> =
-            sqlx::query_as("SELECT order_no, notify_url FROM orders WHERE id = $1 FOR UPDATE").bind(order_id).fetch_optional(&mut *tx).await?;
+            sqlx::query_as("SELECT order_no, notify_url FROM orders WHERE id = $1 FOR UPDATE")
+                .bind(order_id)
+                .fetch_optional(&mut *tx)
+                .await?;
         sqlx::query("UPDATE payments SET status = 'settled' WHERE order_id = $1 AND bank_ref = $2")
             .bind(order_id)
             .bind(&bank_ref)
             .execute(&mut *tx)
             .await?;
-        let moved = sqlx::query("UPDATE orders SET status = 'paid', paid_amount = COALESCE(total, 0) WHERE id = $1 AND status = 'pending'")
-            .bind(order_id)
-            .execute(&mut *tx)
-            .await?;
+        let moved = sqlx::query(
+            "UPDATE orders SET status = 'paid', paid_amount = COALESCE(total, 0) WHERE id = $1 AND status = 'pending'",
+        )
+        .bind(order_id)
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
         if let (Some((order_no, url)), true) = (o, moved.rows_affected() > 0) {
             s.notifier.order_event(order_id, order_no, "paid", url.as_deref());
