@@ -96,7 +96,7 @@ pub async fn login(State(s): State<AppState>, JsonBody(data): JsonBody) -> AppRe
         .bind(&throttle_key)
         .execute(&s.pool)
         .await;
-    if upgrade {
+    if upgrade && s.cfg.upgrade_legacy_hashes {
         // Legacy MD5 row: transparently move it to argon2id now that we know the password.
         if let Ok(new_hash) = tokio::task::spawn_blocking(move || auth::hash_password(&password)).await {
             let _ = sqlx::query("UPDATE users SET password_hash = $1 WHERE id = $2")

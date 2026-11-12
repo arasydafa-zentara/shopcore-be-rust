@@ -32,6 +32,7 @@ BASE_URL=http://localhost:8000 pytest -q tests_legacy   # the original legacy sm
 | `EXPORT_DIR` | `/tmp/exports` | where report exports are written |
 | `PORT` | `8000` | listen port |
 | `DB_MAX_CONNECTIONS` | `20` | pool size |
+| `UPGRADE_LEGACY_HASHES` | `true` | re-hash legacy MD5 passwords with argon2id at login; `false` keeps the legacy service able to authenticate them (rollback path) |
 | `NOTIFY_BLOCK_PRIVATE` | `false` | `true` refuses `notify_url` targets on private/loopback addresses (set it in production) |
 
 A warning is logged at start if the default admin password, bank secret or open notify policy are in use.
@@ -56,7 +57,10 @@ The six legacy tables are unchanged. Additive changes, applied automatically at 
 `sessions` table, `order_no_seq` sequence, and indexes / unique constraints on `users.username`,
 `users.email`, `orders.order_no` plus lookup indexes. The index step is best effort: on a database that
 already contains duplicates the unique index is skipped with a warning instead of stopping the service.
-The legacy service can still run against the migrated database.
+Tables and data stay readable by the legacy service. The one exception is password hashes: accounts that logged in on this
+service are re-hashed with argon2id, which the legacy MD5 check cannot verify. Set `UPGRADE_LEGACY_HASHES=false` while a rollback to the
+legacy service must remain possible. Verified against a populated legacy database (MD5 users, duplicate usernames and order numbers):
+the service starts, skips the unique indexes that cannot be built, authenticates legacy users and continues the order numbering.
 
 ## Behavior that deliberately differs from the legacy service
 

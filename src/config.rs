@@ -12,6 +12,8 @@ pub struct Config {
     pub db_max_connections: u32,
     /// When true, notify_url targets that resolve to loopback/private addresses are refused.
     pub notify_block_private: bool,
+    /// Re-hash legacy MD5 passwords with argon2id at login. Turn off to keep the legacy service able to log users in.
+    pub upgrade_legacy_hashes: bool,
 }
 
 fn var(key: &str, default: &str) -> String {
@@ -34,6 +36,10 @@ impl Config {
             notify_block_private: matches!(
                 var("NOTIFY_BLOCK_PRIVATE", "false").to_lowercase().as_str(),
                 "1" | "true" | "yes"
+            ),
+            upgrade_legacy_hashes: !matches!(
+                var("UPGRADE_LEGACY_HASHES", "true").to_lowercase().as_str(),
+                "0" | "false" | "no"
             ),
         }
     }
