@@ -1,10 +1,4 @@
-target/
-*.gz
-
-
-# Added by cargo
-
-/target
+/target/
 __pycache__/
 *.pyc
 .pytest_cache/
