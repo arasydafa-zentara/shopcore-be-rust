@@ -1,0 +1,47 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  amd64-end-to-end:
+    runs-on: ubuntu-latest   # x86_64
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Architecture
+        run: uname -m
+
+      # The Dockerfile must build from a clean checkout with no network: every crate comes from ./vendor.
+      - name: Build image offline
+        run: docker build --network none -t shopcore-offline .
+
+      - name: Start the stack (app + postgres + bank simulator)
+        run: |
+          docker compose up -d --build
+          for i in $(seq 1 60); do
+            curl -fs localhost:8000/health && break
+            sleep 2
+          done
+          docker compose ps
+
+      - name: Legacy smoke tests (unchanged)
+        run: |
+          pip install pytest requests
+          BASE_URL=http://localhost:8000 pytest -q tests_legacy
+
+      - name: Rust unit + end-to-end tests
+        run: cargo test --locked
+
+      - name: Maintenance commands
+        run: |
+          docker compose exec -T app manage init-db
+          docker compose exec -T app python manage.py seed
+          docker compose exec -T app ./manage.py purge-sessions
+          docker compose exec -T app shopcore manage export-sales /tmp/s.csv
+
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs --no-color | tail -200
