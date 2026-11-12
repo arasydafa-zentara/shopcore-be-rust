@@ -111,6 +111,56 @@ pub async fn payment_in_flight(conn: &mut PgConnection, order_id: i32) -> Result
     Ok(busy)
 }
 
+/// Money actually received for the order. `paid_amount` is authoritative; legacy rows that were settled through the
+/// webhook never stored it, so a captured/settled payment row stands in for "paid in full". An admin merely setting
+/// a status never creates money, so refunds and cancellations can never pay out more than was received.
+const RECEIVED: &str = "(CASE WHEN COALESCE(paid_amount, 0) > 0 THEN paid_amount \
+    WHEN EXISTS (SELECT 1 FROM payments p WHERE p.order_id = orders.id AND p.status IN ('captured', 'settled')) \
+    THEN COALESCE(total, 0) ELSE 0 END)";
+
+pub async fn amount_received(conn: &mut PgConnection, order_id: i32) -> Result<f64, sqlx::Error> {
+    let (v,): (f64,) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {RECEIVED}::float8 FROM orders WHERE id = $1"
+    )))
+    .bind(order_id)
+    .fetch_one(conn)
+    .await?;
+    Ok(v)
+}
+
+/// Cancel an order whose row is already locked (`FOR UPDATE`): give the stock back and refund whatever was received
+/// and not yet refunded. Used by the customer endpoint and by the admin status endpoint.
+pub async fn cancel_locked(conn: &mut PgConnection, id: i32, owner: Option<i32>) -> Result<(), sqlx::Error> {
+    // Lock the affected products in id order, the same order order-creation uses, so the two can never deadlock.
+    sqlx::query(
+        "SELECT id FROM products WHERE id IN (SELECT product_id FROM order_items WHERE order_id = $1) ORDER BY id FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_all(&mut *conn)
+    .await?;
+    sqlx::query(
+        "UPDATE products p SET stock = COALESCE(p.stock, 0) + r.q FROM \
+         (SELECT product_id, SUM(quantity)::int AS q FROM order_items WHERE order_id = $1 GROUP BY product_id) r \
+         WHERE p.id = r.product_id",
+    )
+    .bind(id)
+    .execute(&mut *conn)
+    .await?;
+    let (refunded,): (Option<f64>,) = sqlx::query_as("SELECT refunded FROM orders WHERE id = $1")
+        .bind(id)
+        .fetch_one(&mut *conn)
+        .await?;
+    let back = round2(amount_received(conn, id).await? - refunded.unwrap_or(0.0));
+    if back > 0.0 {
+        credit_wallet(conn, owner, back).await?;
+    }
+    sqlx::query("UPDATE orders SET status = 'cancelled' WHERE id = $1")
+        .bind(id)
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
 pub async fn credit_wallet(conn: &mut PgConnection, user_id: Option<i32>, amount: f64) -> Result<(), sqlx::Error> {
     sqlx::query(
         "UPDATE users SET wallet_balance = ROUND((COALESCE(wallet_balance, 0) + $1)::numeric, 2)::float8 WHERE id = $2",
@@ -146,6 +196,9 @@ pub async fn create(
         Some(Value::Array(a)) if !a.is_empty() => a,
         _ => return Err(AppError::bad_request("items required")),
     };
+    if raw.len() > 100 {
+        return Err(AppError::bad_request("too many items (max 100)"));
+    }
     let mut lines = Vec::with_capacity(raw.len());
     for (idx, it) in raw.iter().enumerate() {
         let Value::Object(o) = it else {
@@ -157,7 +210,8 @@ pub async fn create(
         }
         lines.push(Line {
             idx,
-            pid: to_int(o.get("product_id"), 0) as i32,
+            // An id outside the i32 range cannot exist (it must not wrap around onto a real product).
+            pid: i32::try_from(to_int(o.get("product_id"), 0)).unwrap_or(0),
             qty: qty as i32,
         });
     }
@@ -301,7 +355,7 @@ pub async fn invoice(State(s): State<AppState>, user: AuthUser, Path(id): Path<S
         .map(|it| {
             json!({
                 "sku": it.sku, "name": it.name, "quantity": it.quantity, "price": it.price,
-                "line_total": it.price.unwrap_or(0.0) * it.quantity.unwrap_or(0) as f64,
+                "line_total": round2(it.price.unwrap_or(0.0) * it.quantity.unwrap_or(0) as f64),
             })
         })
         .collect();
@@ -317,12 +371,12 @@ pub async fn invoice(State(s): State<AppState>, user: AuthUser, Path(id): Path<S
 pub async fn cancel(State(s): State<AppState>, user: AuthUser, Path(id): Path<String>) -> AppResult<Json<Order>> {
     let id = parse_id(&id)?;
     let mut tx = s.pool.begin().await?;
-    let row: Option<(Option<i32>, Option<String>, Option<f64>, Option<i32>)> =
-        sqlx::query_as("SELECT user_id, status, total, order_no FROM orders WHERE id = $1 FOR UPDATE")
+    let row: Option<(Option<i32>, Option<String>, Option<i32>)> =
+        sqlx::query_as("SELECT user_id, status, order_no FROM orders WHERE id = $1 FOR UPDATE")
             .bind(id)
             .fetch_optional(&mut *tx)
             .await?;
-    let Some((owner, status, total, order_no)) = row.filter(|r| user.can_access(r.0)) else {
+    let Some((owner, status, order_no)) = row.filter(|r| user.can_access(r.0)) else {
         return Err(AppError::not_found());
     };
     if status.as_deref() == Some("cancelled") {
@@ -331,21 +385,7 @@ pub async fn cancel(State(s): State<AppState>, user: AuthUser, Path(id): Path<St
     if payment_in_flight(&mut tx, id).await? {
         return Err(AppError::conflict("payment in progress"));
     }
-    sqlx::query(
-        "UPDATE products p SET stock = COALESCE(p.stock, 0) + r.q FROM \
-         (SELECT product_id, SUM(quantity)::int AS q FROM order_items WHERE order_id = $1 GROUP BY product_id) r \
-         WHERE p.id = r.product_id",
-    )
-    .bind(id)
-    .execute(&mut *tx)
-    .await?;
-    if matches!(status.as_deref(), Some("paid") | Some("shipped")) {
-        credit_wallet(&mut tx, owner, total.unwrap_or(0.0)).await?;
-    }
-    sqlx::query("UPDATE orders SET status = 'cancelled' WHERE id = $1")
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
+    cancel_locked(&mut tx, id, owner).await?;
     tx.commit().await?;
     jobs::email(&format!("Order {} cancelled", order_no.unwrap_or_default()));
     Ok(Json(fetch_order(&s.pool, id).await?.ok_or_else(AppError::not_found)?))
@@ -359,12 +399,12 @@ pub async fn refund(
 ) -> AppResult<Json<Order>> {
     let id = parse_id(&id)?;
     let mut tx = s.pool.begin().await?;
-    let row: Option<(Option<i32>, Option<String>, Option<f64>, Option<f64>)> =
-        sqlx::query_as("SELECT user_id, status, total, refunded FROM orders WHERE id = $1 FOR UPDATE")
+    let row: Option<(Option<i32>, Option<String>, Option<f64>)> =
+        sqlx::query_as("SELECT user_id, status, refunded FROM orders WHERE id = $1 FOR UPDATE")
             .bind(id)
             .fetch_optional(&mut *tx)
             .await?;
-    let Some((owner, status, total, refunded)) = row.filter(|r| user.can_access(r.0)) else {
+    let Some((owner, status, refunded)) = row.filter(|r| user.can_access(r.0)) else {
         return Err(AppError::not_found());
     };
     match status.as_deref() {
@@ -372,7 +412,7 @@ pub async fn refund(
         Some("cancelled") => return Err(AppError::conflict("order cancelled")),
         _ => {}
     }
-    let remaining = round2(total.unwrap_or(0.0) - refunded.unwrap_or(0.0));
+    let remaining = round2(amount_received(&mut tx, id).await? - refunded.unwrap_or(0.0));
     if remaining <= 0.0 {
         return Err(AppError::conflict("order already fully refunded"));
     }

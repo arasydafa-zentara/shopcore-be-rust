@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use crate::{
     auth::AdminUser,
     error::{AppError, AppResult},
-    routes::orders::payment_in_flight,
+    routes::orders::{amount_received, cancel_locked, payment_in_flight},
     state::AppState,
     util::{JsonBody, parse_id, py_str, ts},
 };
@@ -42,10 +42,8 @@ pub async fn set_role(
     JsonBody(data): JsonBody,
 ) -> AppResult<Json<Value>> {
     let id = parse_id(&id)?;
-    let role = match data.get("role") {
-        None => "user".to_string(),
-        Some(v) => py_str(Some(v)).unwrap_or_default(),
-    };
+    // No silent default: a request without a role must never demote somebody.
+    let role = py_str(data.get("role")).unwrap_or_default();
     if role != "user" && role != "admin" {
         return Err(AppError::bad_request("role must be user or admin"));
     }
@@ -73,15 +71,27 @@ pub async fn set_order_status(
         return Err(AppError::bad_request("invalid status"));
     }
     let mut tx = s.pool.begin().await?;
-    let exists: Option<(i32,)> = sqlx::query_as("SELECT id FROM orders WHERE id = $1 FOR UPDATE")
-        .bind(id)
-        .fetch_optional(&mut *tx)
-        .await?;
-    if exists.is_none() {
+    let cur: Option<(Option<String>, Option<i32>)> =
+        sqlx::query_as("SELECT status, user_id FROM orders WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some((current, owner)) = cur else {
         return Err(AppError::not_found());
-    }
+    };
     if payment_in_flight(&mut tx, id).await? {
         return Err(AppError::conflict("payment in progress"));
+    }
+    // Guard rails: a status change must never move money or stock behind the ledger's back.
+    if current.as_deref() == Some("cancelled") {
+        return Err(AppError::conflict("order is cancelled"));
+    }
+    if status == "pending" && amount_received(&mut tx, id).await? > 0.0 {
+        return Err(AppError::conflict("order has already been paid"));
+    }
+    if status == "cancelled" {
+        // Same bookkeeping as the customer's cancel: stock returns, received money goes back to the wallet.
+        cancel_locked(&mut tx, id, owner).await?;
     }
     let (id, order_no, status): (i32, Option<i32>, Option<String>) =
         sqlx::query_as("UPDATE orders SET status = $1 WHERE id = $2 RETURNING id, order_no, status")

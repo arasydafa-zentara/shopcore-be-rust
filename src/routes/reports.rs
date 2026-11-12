@@ -68,7 +68,8 @@ pub async fn sales(
 
 /// A file name that stays inside the export directory.
 fn safe_name(name: &str) -> bool {
-    !name.is_empty() && name.len() <= 200 && name != "." && name != ".." && !name.contains(['/', '\\', '\0'])
+    // No leading dot: that also rules out "." / ".." and the hidden temp files used while an export is being written.
+    !name.is_empty() && name.len() <= 200 && !name.starts_with('.') && !name.contains(['/', '\\', '\0'])
 }
 
 /// Spreadsheet formula guard: a text cell that starts with `= + - @` (or a control character) would be
@@ -102,7 +103,8 @@ pub async fn export(State(s): State<AppState>, _a: AdminUser, JsonBody(data): Js
     let dir = FsPath::new(&s.cfg.export_dir);
     tokio::fs::create_dir_all(dir).await?;
     let final_path = dir.join(format!("{filename}.gz"));
-    let tmp_path = dir.join(format!(".{filename}.gz.tmp"));
+    // Unique per request: two exports with the same name must not write into one temp file.
+    let tmp_path = dir.join(format!(".tmp-{:016x}.part", rand::random::<u64>()));
 
     // Rows are streamed from Postgres to a blocking writer thread that gzips as it goes (no shell, no
     // whole-report string in memory).
@@ -214,6 +216,8 @@ mod tests {
         assert!(!safe_name("../etc/passwd"));
         assert!(!safe_name("/etc/passwd"));
         assert!(!safe_name(".."));
+        assert!(!safe_name(".tmp-1.part"));
+        assert!(!safe_name(".hidden"));
         assert!(!safe_name("a\\b"));
         assert!(!safe_name(""));
     }

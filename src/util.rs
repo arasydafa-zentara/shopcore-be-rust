@@ -36,11 +36,6 @@ pub fn parse_int_str(s: &str) -> Option<i64> {
     Some(if neg { -n } else { n })
 }
 
-/// Python `float(v)`. Returns `default` when the value is missing or not a number.
-pub fn to_money(v: Option<&Value>, default: f64) -> f64 {
-    parse_money(v).unwrap_or(default)
-}
-
 pub fn parse_money(v: Option<&Value>) -> Option<f64> {
     match v {
         Some(Value::Number(n)) => n.as_f64(),
@@ -92,29 +87,45 @@ pub fn ts(col: &str) -> String {
 }
 
 /// Page/limit as in the legacy list endpoints: limit < 0 means "no limit", page < 1 is clamped.
+/// Hard ceiling for one page. `limit < 0` keeps its legacy meaning of "everything", which is capped here as well so a
+/// single request can never dump an unbounded table.
+pub const MAX_PAGE: i64 = 10_000;
+
 pub fn paging(page: Option<&str>, limit: Option<&str>) -> (i64, Option<i64>) {
     let page = page.and_then(parse_int_str).unwrap_or(1).max(1);
     let limit = limit.and_then(parse_int_str).unwrap_or(20);
     if limit < 0 {
-        (0, None)
+        (0, Some(MAX_PAGE))
     } else {
+        let limit = limit.min(MAX_PAGE);
         ((page - 1).saturating_mul(limit), Some(limit))
     }
 }
 
-/// JSON body extractor equivalent to Flask's `request.get_json(silent=True) or {}`:
-/// anything that is not a JSON object becomes an empty object instead of a 4xx.
+/// JSON body extractor modelled on Flask's `request.get_json(silent=True) or {}`: a missing body, or one that is not
+/// declared as JSON, is an empty object. A body that IS declared as JSON but cannot be parsed (or is not an object) is
+/// rejected with 400: silently treating a truncated `{"amount": 5` as "no amount" would trigger the endpoint defaults
+/// (a full refund, a role change, a wallet payment) that the caller never asked for.
 pub struct JsonBody(pub Map<String, Value>);
 
 impl<S: Send + Sync> FromRequest<S> for JsonBody {
     type Rejection = AppError;
 
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        let declared_json = req
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.to_ascii_lowercase().contains("json"))
+            .unwrap_or(false);
         let bytes = Bytes::from_request(req, state)
             .await
             .map_err(|_| AppError::with(axum::http::StatusCode::PAYLOAD_TOO_LARGE, "body too large"))?;
         let map = match serde_json::from_slice::<Value>(&bytes) {
             Ok(Value::Object(m)) => m,
+            _ if declared_json && !bytes.iter().all(u8::is_ascii_whitespace) => {
+                return Err(AppError::bad_request("request body must be a JSON object"));
+            }
             _ => Map::new(),
         };
         Ok(JsonBody(map))
@@ -142,8 +153,8 @@ mod tests {
 
     #[test]
     fn money_coercion() {
-        assert_eq!(to_money(Some(&json!("12.5")), 0.0), 12.5);
-        assert_eq!(to_money(Some(&json!("x")), 3.0), 3.0);
+        assert_eq!(parse_money(Some(&json!("12.5"))), Some(12.5));
+        assert_eq!(parse_money(Some(&json!("x"))), None);
         assert!(parse_money(Some(&json!("nan"))).unwrap().is_nan());
     }
 
@@ -162,6 +173,7 @@ mod tests {
         assert!(parse_id("abc").is_err());
         assert_eq!(paging(None, None), (0, Some(20)));
         assert_eq!(paging(Some("3"), Some("10")), (20, Some(10)));
-        assert_eq!(paging(Some("0"), Some("-1")), (0, None));
+        assert_eq!(paging(Some("0"), Some("-1")), (0, Some(MAX_PAGE)));
+        assert_eq!(paging(None, Some("999999999")), (0, Some(MAX_PAGE)));
     }
 }

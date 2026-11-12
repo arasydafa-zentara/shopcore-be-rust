@@ -68,6 +68,8 @@ CREATE TABLE IF NOT EXISTS login_failures (
     failed_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+ALTER TABLE login_failures ADD COLUMN IF NOT EXISTS ip TEXT NOT NULL DEFAULT '';
+
 -- New (additive): race-free order numbers, continuing after the highest existing one.
 DO $$
 BEGIN

@@ -550,3 +550,329 @@ async fn order_cannot_be_cancelled_while_a_bank_payment_is_in_flight() {
         .send()
         .await;
 }
+
+async fn balance(c: &Client, tok: &str) -> f64 {
+    let w: Value = call(c, "GET", "/api/wallet", Some(tok), None)
+        .await
+        .json()
+        .await
+        .unwrap();
+    w["balance"].as_f64().unwrap()
+}
+
+async fn new_order(c: &Client, tok: &str, pid: i64) -> i64 {
+    let o: Value = call(
+        c,
+        "POST",
+        "/api/orders",
+        Some(tok),
+        Some(json!({"items": [{"product_id": pid, "quantity": 1}]})),
+    )
+    .await
+    .json()
+    .await
+    .unwrap();
+    o["id"].as_i64().unwrap()
+}
+
+#[tokio::test]
+async fn admin_status_changes_cannot_create_or_lose_money() {
+    let c = client();
+    if !up(&c).await {
+        return;
+    }
+    let adm = admin(&c).await;
+    let pid = product(&c, &adm, 40.0, 50).await;
+    let (_, tok) = user(&c).await;
+
+    // never paid, admin marks it shipped: nothing was received, so nothing can be refunded or cancelled for cash
+    let o = new_order(&c, &tok, pid).await;
+    assert_eq!(
+        call(
+            &c,
+            "POST",
+            &format!("/api/admin/orders/{o}/status"),
+            Some(&adm),
+            Some(json!({"status": "shipped"}))
+        )
+        .await
+        .status(),
+        200
+    );
+    assert_eq!(
+        call(
+            &c,
+            "POST",
+            &format!("/api/orders/{o}/refund"),
+            Some(&tok),
+            Some(json!({}))
+        )
+        .await
+        .status(),
+        409
+    );
+    assert_eq!(
+        call(&c, "POST", &format!("/api/orders/{o}/cancel"), Some(&tok), None)
+            .await
+            .status(),
+        200
+    );
+    assert_eq!(balance(&c, &tok).await, 0.0);
+
+    // a cancelled order is terminal: the admin cannot resurrect it (which would restock and refund twice)
+    assert_eq!(
+        call(
+            &c,
+            "POST",
+            &format!("/api/admin/orders/{o}/status"),
+            Some(&adm),
+            Some(json!({"status": "shipped"}))
+        )
+        .await
+        .status(),
+        409
+    );
+
+    // a paid order cannot be pushed back to pending (and be paid a second time)
+    call(
+        &c,
+        "POST",
+        "/api/wallet/topup",
+        Some(&tok),
+        Some(json!({"amount": 200})),
+    )
+    .await;
+    let p = new_order(&c, &tok, pid).await;
+    assert_eq!(
+        call(
+            &c,
+            "POST",
+            &format!("/api/orders/{p}/pay"),
+            Some(&tok),
+            Some(json!({"method": "wallet"}))
+        )
+        .await
+        .status(),
+        200
+    );
+    assert_eq!(
+        call(
+            &c,
+            "POST",
+            &format!("/api/admin/orders/{p}/status"),
+            Some(&adm),
+            Some(json!({"status": "pending"}))
+        )
+        .await
+        .status(),
+        409
+    );
+
+    // admin cancelling a paid order gives the customer's money back (and only once)
+    assert_eq!(balance(&c, &tok).await, 160.0);
+    assert_eq!(
+        call(
+            &c,
+            "POST",
+            &format!("/api/admin/orders/{p}/status"),
+            Some(&adm),
+            Some(json!({"status": "cancelled"}))
+        )
+        .await
+        .status(),
+        200
+    );
+    assert_eq!(balance(&c, &tok).await, 200.0);
+}
+
+#[tokio::test]
+async fn cancel_after_partial_refund_returns_only_the_rest() {
+    let c = client();
+    if !up(&c).await {
+        return;
+    }
+    let adm = admin(&c).await;
+    let pid = product(&c, &adm, 100.0, 50).await;
+    let (_, tok) = user(&c).await;
+    call(
+        &c,
+        "POST",
+        "/api/wallet/topup",
+        Some(&tok),
+        Some(json!({"amount": 100})),
+    )
+    .await;
+    let o = new_order(&c, &tok, pid).await;
+    call(
+        &c,
+        "POST",
+        &format!("/api/orders/{o}/pay"),
+        Some(&tok),
+        Some(json!({"method": "wallet"})),
+    )
+    .await;
+    assert_eq!(
+        call(
+            &c,
+            "POST",
+            &format!("/api/orders/{o}/refund"),
+            Some(&tok),
+            Some(json!({"amount": 10}))
+        )
+        .await
+        .status(),
+        200
+    );
+    assert_eq!(
+        call(&c, "POST", &format!("/api/orders/{o}/cancel"), Some(&tok), None)
+            .await
+            .status(),
+        200
+    );
+    assert_eq!(balance(&c, &tok).await, 100.0); // 0 after paying, +10 refund, +90 on cancel
+}
+
+#[tokio::test]
+async fn malformed_json_never_triggers_endpoint_defaults() {
+    let c = client();
+    if !up(&c).await {
+        return;
+    }
+    let adm = admin(&c).await;
+    let pid = product(&c, &adm, 30.0, 50).await;
+    let (uid, tok) = user(&c).await;
+    call(
+        &c,
+        "POST",
+        "/api/wallet/topup",
+        Some(&tok),
+        Some(json!({"amount": 100})),
+    )
+    .await;
+    let o = new_order(&c, &tok, pid).await;
+    call(
+        &c,
+        "POST",
+        &format!("/api/orders/{o}/pay"),
+        Some(&tok),
+        Some(json!({"method": "wallet"})),
+    )
+    .await;
+    let truncated = |path: String, token: String| {
+        let c = c.clone();
+        async move {
+            c.post(format!("{}{}", base(), path))
+                .bearer_auth(token)
+                .header("content-type", "application/json")
+                .body("{\"amount\": 5")
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .as_u16()
+        }
+    };
+    assert_eq!(truncated(format!("/api/orders/{o}/refund"), tok.clone()).await, 400);
+    assert_eq!(balance(&c, &tok).await, 70.0, "a broken body must not refund anything");
+    assert_eq!(
+        truncated(format!("/api/admin/users/{uid}/role"), adm.clone()).await,
+        400
+    );
+    // and a role change without a role is refused instead of silently demoting
+    assert_eq!(
+        call(
+            &c,
+            "POST",
+            &format!("/api/admin/users/{uid}/role"),
+            Some(&adm),
+            Some(json!({}))
+        )
+        .await
+        .status(),
+        400
+    );
+}
+
+#[tokio::test]
+async fn product_edits_keep_stock_and_reject_bad_numbers() {
+    let c = client();
+    if !up(&c).await {
+        return;
+    }
+    let adm = admin(&c).await;
+    let pid = product(&c, &adm, 10.0, 10).await;
+    let (_, tok) = user(&c).await;
+    new_order(&c, &tok, pid).await; // stock 10 -> 9
+    let p: Value = call(
+        &c,
+        "PUT",
+        &format!("/api/products/{pid}"),
+        Some(&adm),
+        Some(json!({"name": "renamed"})),
+    )
+    .await
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(p["stock"], 9);
+    assert_eq!(p["name"], "renamed");
+    for bad in [
+        json!({"price": -1}),
+        json!({"price": "nan"}),
+        json!({"stock": -5}),
+        json!({"stock": 4294967296u64}),
+    ] {
+        assert_eq!(
+            call(&c, "PUT", &format!("/api/products/{pid}"), Some(&adm), Some(bad))
+                .await
+                .status(),
+            400
+        );
+    }
+    assert_eq!(
+        call(
+            &c,
+            "POST",
+            "/api/products",
+            Some(&adm),
+            Some(json!({"sku": "n", "name": "n", "price": -3, "stock": 1}))
+        )
+        .await
+        .status(),
+        400
+    );
+}
+
+#[tokio::test]
+async fn list_and_order_sizes_are_bounded() {
+    let c = client();
+    if !up(&c).await {
+        return;
+    }
+    let (_, tok) = user(&c).await;
+    let many: Vec<Value> = (0..101).map(|_| json!({"product_id": 1, "quantity": 1})).collect();
+    assert_eq!(
+        call(&c, "POST", "/api/orders", Some(&tok), Some(json!({"items": many})))
+            .await
+            .status(),
+        400
+    );
+    let all: Value = call(&c, "GET", "/api/products?limit=-1", None, None)
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(all.as_array().unwrap().len() <= 10_000);
+    // `%` is a literal character in a search, not a wildcard
+    let hits: Value = call(&c, "GET", "/api/products?q=%25", None, None)
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        hits.as_array()
+            .unwrap()
+            .iter()
+            .all(|p| p["name"].as_str().unwrap_or("").contains('%'))
+    );
+}

@@ -71,6 +71,17 @@ pub fn hash_password(p: &str) -> String {
     hash.map(|h| h.to_string()).unwrap_or_default()
 }
 
+/// Run CPU-heavy password work on the blocking pool, at most `hash_gate` permits at a time.
+pub async fn blocking<T: Send + 'static>(
+    gate: &tokio::sync::Semaphore,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, AppError> {
+    let _permit = gate.acquire().await.map_err(|_| AppError::unauthorized())?;
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|_| AppError::with(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "internal error"))
+}
+
 /// Verify against either an argon2 hash or a legacy unsalted MD5 hex digest (existing production rows).
 /// Returns (matches, needs_upgrade).
 pub fn verify_password(p: &str, stored: &str) -> (bool, bool) {
@@ -78,6 +89,8 @@ pub fn verify_password(p: &str, stored: &str) -> (bool, bool) {
         (Argon2::default().verify_password(p.as_bytes(), stored).is_ok(), false)
     } else {
         let ok = md5_hex(p).as_bytes().ct_eq(stored.as_bytes()).into();
+        // Cost-match the argon2 path so response time does not reveal which accounts still hold legacy hashes.
+        dummy_verify(p);
         (ok, ok)
     }
 }

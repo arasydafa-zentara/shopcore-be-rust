@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 
 use crate::config::Config;
 
-const SHARDS: usize = 8;
+const SHARDS: usize = 32;
 
 #[derive(Debug)]
 pub struct NotifyJob {
@@ -30,7 +30,8 @@ impl Notifier {
             let block_private = cfg.notify_block_private;
             tokio::spawn(async move {
                 while let Some(job) = rx.recv().await {
-                    deliver(job, block_private).await;
+                    // Hard ceiling per job so one slow or hostile receiver cannot hold a worker for long.
+                    let _ = tokio::time::timeout(Duration::from_secs(10), deliver(job, block_private)).await;
                 }
             });
             shards.push(tx);
@@ -58,10 +59,21 @@ pub fn email(subject: &str) {
     tracing::info!(subject, "email queued");
 }
 
-fn is_link_local(ip: &IpAddr) -> bool {
+/// Addresses that are refused whatever the configuration: link-local ranges and the well-known cloud metadata
+/// endpoints, including when they are written as IPv4-mapped / IPv4-compatible IPv6 addresses.
+fn is_always_blocked(ip: &IpAddr) -> bool {
     match ip {
-        IpAddr::V4(v4) => v4.is_link_local(),
-        IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) == 0xfe80,
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_link_local() || o == [100, 100, 100, 200] || o == [192, 0, 0, 192]
+        }
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped().or_else(|| v6.to_ipv4()) {
+                return is_always_blocked(&IpAddr::V4(v4));
+            }
+            let s = v6.segments();
+            (s[0] & 0xffc0) == 0xfe80 || (s[0] == 0xfd00 && s[1] == 0x0ec2)
+        }
     }
 }
 
@@ -92,14 +104,15 @@ async fn deliver(job: NotifyJob, block_private: bool) {
         return;
     };
     let port = url.port_or_known_default().unwrap_or(80);
-    let addrs: Vec<std::net::SocketAddr> = match tokio::net::lookup_host((host.as_str(), port)).await {
-        Ok(a) => a.collect(),
-        Err(_) => {
+    let lookup = tokio::time::timeout(Duration::from_secs(2), tokio::net::lookup_host((host.as_str(), port)));
+    let addrs: Vec<std::net::SocketAddr> = match lookup.await {
+        Ok(Ok(a)) => a.collect(),
+        _ => {
             tracing::warn!("notify: dns lookup failed");
             return;
         }
     };
-    if addrs.is_empty() || addrs.iter().any(|a| is_link_local(&a.ip())) {
+    if addrs.is_empty() || addrs.iter().any(|a| is_always_blocked(&a.ip())) {
         tracing::warn!("notify: target refused (link-local or unresolved)");
         return;
     }
@@ -110,14 +123,14 @@ async fn deliver(job: NotifyJob, block_private: bool) {
     // Pin the connection to the addresses we just validated (no second DNS lookup = no rebinding).
     let client = match reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(4))
         .resolve_to_addrs(&host, &addrs)
         .build()
     {
         Ok(c) => c,
         Err(_) => return,
     };
-    for attempt in 0..3u64 {
+    for attempt in 0..2u64 {
         match client.post(url.clone()).json(&job.body).send().await {
             Ok(r) if r.status().as_u16() < 500 => return,
             _ => tokio::time::sleep(Duration::from_millis(200 * (attempt + 1))).await,
@@ -132,8 +145,13 @@ mod tests {
 
     #[test]
     fn address_classification() {
-        assert!(is_link_local(&"169.254.169.254".parse().unwrap()));
-        assert!(!is_link_local(&"10.0.0.5".parse().unwrap()));
+        assert!(is_always_blocked(&"169.254.169.254".parse().unwrap()));
+        assert!(is_always_blocked(&"::ffff:169.254.169.254".parse().unwrap()));
+        assert!(is_always_blocked(&"fd00:ec2::254".parse().unwrap()));
+        assert!(is_always_blocked(&"fe80::1".parse().unwrap()));
+        assert!(is_always_blocked(&"100.100.100.200".parse().unwrap()));
+        assert!(!is_always_blocked(&"10.0.0.5".parse().unwrap()));
+        assert!(!is_always_blocked(&"8.8.8.8".parse().unwrap()));
         assert!(is_private(&"10.0.0.5".parse().unwrap()));
         assert!(is_private(&"127.0.0.1".parse().unwrap()));
         assert!(is_private(&"::1".parse().unwrap()));

@@ -92,6 +92,20 @@ Money and consistency (all concurrency bugs in the legacy read-modify-write code
   made outside any database transaction, after the order has been claimed by a pending payment row. If the settlement webhook arrives
   first the payment is stored as settled.
 
+Order and money integrity (found by an independent review of this code):
+- Refunds and cancellations pay out what was actually received (`paid_amount`), never `total` or whatever `status` says. A cancel after a
+  partial refund returns the remainder. The admin status endpoint cannot create money: a cancelled order is terminal, a paid order
+  cannot go back to `pending`, and setting `cancelled` runs the same bookkeeping as a customer cancel (stock back, money refunded once).
+- A body declared as JSON that cannot be parsed is `400`. (It used to be treated as `{}`, so a truncated refund request refunded the
+  whole order.) `POST /admin/users/{id}/role` requires a `role`; there is no default that could demote someone.
+- `PUT /products/{id}` is a single `UPDATE` (a concurrent order's stock change can no longer be overwritten); prices must be finite and
+  non-negative, stock a non-negative 32-bit integer. Product ids outside the 32-bit range are "not found" instead of wrapping around.
+- A bank payment runs in a task detached from the request, so a client that disconnects mid-payment cannot leave the charge unrecorded;
+  `notify_url` receives `paid` exactly once. Page size is capped at 10 000 (`limit=-1` means "up to the cap"), an order holds at most 100
+  items, and `%` / `_` in a product search are literal characters.
+- `notify_url` filtering also covers IPv4-mapped IPv6 addresses and the IPv6/Alibaba/Oracle metadata addresses; DNS lookup and delivery
+  have hard time limits so a hostile receiver cannot tie up the delivery workers.
+
 Spec conformance:
 - Invalid `sort`, `group_by`, admin `role` and order `status` values are `400` (legacy: SQL error `500` or silently accepted).
 - Sales report is no longer cached forever (it returned stale numbers) and is computed with two SQL aggregates instead of
@@ -115,8 +129,10 @@ delivered in order (pending, then paid). E-mails were never delivered in the leg
 - **Payment states.** `payments.status` is `pending` (bank charge in flight), `captured`, `settled`, or `failed`. While a payment is
   pending the order cannot be cancelled, moved by an admin or paid a second time (`409 payment in progress`), so a customer is never
   charged for an order that no longer exists. A pending row older than two minutes (a crashed request) is retired automatically.
-- **Login throttle.** 10 failed attempts for a username within 60 s are answered with `429` until the window passes
-  (table `login_failures`; a successful login clears it). Other usernames are unaffected.
+- **Login throttle.** 10 failed attempts for a username from one client address within 60 s (or 60 failures from one address across
+  usernames) are answered with `429` until the window passes (table `login_failures`; a successful login clears it). Counting per
+  address means a stranger cannot lock a user out of their own address. Password hashing runs on a bounded pool, so a burst of
+  logins queues instead of exhausting memory.
 - **CSV exports** prefix text cells that start with `= + - @` with an apostrophe, so spreadsheets do not evaluate them.
 - **Timestamps** keep the legacy rendering (`Thu, 12 Nov 2026 10:00:00 GMT`; order times are Jakarta wall-clock values).
 - **`manage.py`** is a tiny launcher that execs the Rust binary, so `python manage.py seed`, `./manage.py seed`, `manage seed` and

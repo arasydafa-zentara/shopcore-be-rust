@@ -32,7 +32,7 @@ pub async fn bank(State(s): State<AppState>, headers: HeaderMap, body: Bytes) ->
         let order_id = to_int(data.get("order_id"), 0) as i32;
         let bank_ref = py_str(data.get("bank_ref"));
         let mut tx = s.pool.begin().await?;
-        // Taking the order lock first makes this wait for an in-flight payment to commit.
+        // Lock the order row so the status/payment updates below are applied consistently with any concurrent change.
         let o: Option<(Option<i32>, Option<String>)> =
             sqlx::query_as("SELECT order_no, notify_url FROM orders WHERE id = $1 FOR UPDATE")
                 .bind(order_id)

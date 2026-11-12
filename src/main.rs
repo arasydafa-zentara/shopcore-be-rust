@@ -100,11 +100,18 @@ async fn serve(cfg: Config) -> i32 {
         .expect("http client");
     let notifier = jobs::Notifier::start(&cfg);
     let port = cfg.port;
+    let hash_gate = Arc::new(tokio::sync::Semaphore::new(
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(2)
+            .clamp(2, 8),
+    ));
     let state = AppState {
         pool,
         cfg: Arc::new(cfg),
         http,
         notifier,
+        hash_gate,
     };
     let app = routes::router(state);
     let listener = match tokio::net::TcpListener::bind(("0.0.0.0", port)).await {
@@ -115,7 +122,12 @@ async fn serve(cfg: Config) -> i32 {
         }
     };
     tracing::info!(port, "shopcore listening");
-    let served = axum::serve(listener, app).with_graceful_shutdown(shutdown()).await;
+    let served = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown())
+    .await;
     if let Err(e) = served {
         tracing::error!(error = %e, "server error");
         return 1;

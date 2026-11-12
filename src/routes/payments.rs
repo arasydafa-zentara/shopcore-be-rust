@@ -42,39 +42,55 @@ pub async fn pay(
     }
     let total = total.unwrap_or(0.0);
 
-    let bank_ref = match method.as_str() {
+    if total < 0.0 || !total.is_finite() {
+        return Err(AppError::conflict("order total is not payable"));
+    }
+
+    // `announce` is false when the settlement webhook already moved the order to paid (and announced it).
+    let (bank_ref, announce) = match method.as_str() {
         "wallet" => {
             pay_wallet(&s, &user, oid, total).await?;
-            None
+            (None, true)
         }
         "bank" => {
-            // 1. Under the order lock, claim the order with a `pending` payment row (this also stops a
-            //    cancel or a second payment while the bank call is running).
-            let payment_id = begin_bank_payment(&s, oid, total).await?;
-            // 2. Charge outside any transaction. Every attempt carries the same Idempotency-Key, so the bank
-            //    records one charge. The row's number and creation time keep the key unique even if ids are reused.
+            // Same Idempotency-Key for every attempt: the bank records one charge. The order's number and creation time
+            // keep the key unique even if ids are ever reused.
             let key = format!(
                 "shopcore-{}-{}-{}",
                 oid,
                 order_no.unwrap_or_default(),
                 created.unwrap_or_default()
             );
-            let Some(bank_ref) = bank::charge(&s, &s.cfg, oid, total, &key).await else {
-                abort_bank_payment(&s, payment_id).await;
-                return Err(AppError::with(axum::http::StatusCode::BAD_GATEWAY, "payment failed"));
-            };
-            // 3. Record the result and mark the order paid.
-            finish_bank_payment(&s, oid, payment_id, total, &bank_ref).await?;
-            Some(bank_ref)
+            // Detached task: if the client disconnects mid-payment the charge that already happened must still be
+            // recorded, otherwise the order would stay locked and the payment row pending.
+            let st = s.clone();
+            let (r, moved) = tokio::spawn(async move { bank_payment(&st, oid, total, &key).await })
+                .await
+                .map_err(|_| AppError::with(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "internal error"))??;
+            (Some(r), moved)
         }
         _ => return Err(AppError::bad_request("unknown method")),
     };
 
     jobs::email(&format!("Payment received for order {}", order_no.unwrap_or_default()));
-    s.notifier.order_event(oid, order_no, "paid", notify_url.as_deref());
+    if announce {
+        s.notifier.order_event(oid, order_no, "paid", notify_url.as_deref());
+    }
     Ok(Json(
         json!({ "order_id": oid, "status": "paid", "method": method, "bank_ref": bank_ref }),
     ))
+}
+
+/// 1. claim the order with a `pending` payment row (stops cancels and second payments while the bank call runs),
+/// 2. charge outside any transaction, 3. record the result and mark the order paid.
+async fn bank_payment(s: &AppState, oid: i32, total: f64, key: &str) -> AppResult<(String, bool)> {
+    let payment_id = begin_bank_payment(s, oid, total).await?;
+    let Some(bank_ref) = bank::charge(s, &s.cfg, oid, total, key).await else {
+        abort_bank_payment(s, payment_id).await;
+        return Err(AppError::with(axum::http::StatusCode::BAD_GATEWAY, "payment failed"));
+    };
+    let moved = finish_bank_payment(s, oid, payment_id, total, &bank_ref).await?;
+    Ok((bank_ref, moved))
 }
 
 async fn pay_wallet(s: &AppState, user: &AuthUser, oid: i32, total: f64) -> AppResult<()> {
@@ -157,7 +173,7 @@ async fn abort_bank_payment(s: &AppState, payment_id: i32) {
 
 /// The settlement webhook can arrive before this commit (the bank settles ~0.2s after the charge). Then the
 /// order is already `paid` and the payment is stored as settled straight away.
-async fn finish_bank_payment(s: &AppState, oid: i32, payment_id: i32, total: f64, bank_ref: &str) -> AppResult<()> {
+async fn finish_bank_payment(s: &AppState, oid: i32, payment_id: i32, total: f64, bank_ref: &str) -> AppResult<bool> {
     let mut tx = s.pool.begin().await?;
     let st: Option<(Option<String>,)> = sqlx::query_as("SELECT status FROM orders WHERE id = $1 FOR UPDATE")
         .bind(oid)
@@ -190,5 +206,6 @@ async fn finish_bank_payment(s: &AppState, oid: i32, payment_id: i32, total: f64
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    Ok(())
+    // True only when this call is what moved the order to paid; otherwise the webhook did it and announced it.
+    Ok(payment_status == "captured")
 }
