@@ -57,6 +57,20 @@ pub async fn register(
 pub async fn login(State(s): State<AppState>, JsonBody(data): JsonBody) -> AppResult<Json<Value>> {
     let username = py_str(data.get("username"));
     let password = py_str(data.get("password")).unwrap_or_default();
+    // Brute-force guard: too many recent failures for this name -> 429 until the window passes.
+    let throttle_key: String = username.clone().unwrap_or_default().chars().take(100).collect();
+    let (recent,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM login_failures WHERE username = $1 AND failed_at > now() - interval '60 seconds'",
+    )
+    .bind(&throttle_key)
+    .fetch_one(&s.pool)
+    .await?;
+    if recent >= MAX_FAILED_LOGINS {
+        return Err(AppError::with(
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "too many attempts, try again later",
+        ));
+    }
     let row: Option<(i32, Option<String>)> = match &username {
         Some(u) => {
             sqlx::query_as("SELECT id, password_hash FROM users WHERE username = $1 ORDER BY id LIMIT 1")
@@ -68,7 +82,7 @@ pub async fn login(State(s): State<AppState>, JsonBody(data): JsonBody) -> AppRe
     };
     let Some((uid, stored)) = row else {
         let _ = tokio::task::spawn_blocking(move || auth::dummy_verify(&password)).await;
-        return Err(invalid_credentials());
+        return Err(login_failed(&s, &throttle_key).await);
     };
     let stored = stored.unwrap_or_default();
     let pw = password.clone();
@@ -76,8 +90,12 @@ pub async fn login(State(s): State<AppState>, JsonBody(data): JsonBody) -> AppRe
         .await
         .unwrap_or((false, false));
     if !ok {
-        return Err(invalid_credentials());
+        return Err(login_failed(&s, &throttle_key).await);
     }
+    let _ = sqlx::query("DELETE FROM login_failures WHERE username = $1")
+        .bind(&throttle_key)
+        .execute(&s.pool)
+        .await;
     if upgrade {
         // Legacy MD5 row: transparently move it to argon2id now that we know the password.
         if let Ok(new_hash) = tokio::task::spawn_blocking(move || auth::hash_password(&password)).await {
@@ -97,7 +115,17 @@ pub async fn login(State(s): State<AppState>, JsonBody(data): JsonBody) -> AppRe
     Ok(Json(json!({ "token": token })))
 }
 
-fn invalid_credentials() -> AppError {
+const MAX_FAILED_LOGINS: i64 = 10;
+
+/// Record a failed attempt (and drop old records) and produce the 401.
+async fn login_failed(s: &AppState, key: &str) -> AppError {
+    let _ = sqlx::query("INSERT INTO login_failures (username) VALUES ($1)")
+        .bind(key)
+        .execute(&s.pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM login_failures WHERE failed_at < now() - interval '10 minutes'")
+        .execute(&s.pool)
+        .await;
     AppError::with(axum::http::StatusCode::UNAUTHORIZED, "invalid credentials")
 }
 

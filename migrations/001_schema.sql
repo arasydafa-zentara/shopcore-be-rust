@@ -61,6 +61,13 @@ CREATE TABLE IF NOT EXISTS sessions (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- New (additive): failed login attempts, for the brute-force limiter.
+CREATE TABLE IF NOT EXISTS login_failures (
+    id BIGSERIAL PRIMARY KEY,
+    username TEXT NOT NULL,
+    failed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- New (additive): race-free order numbers, continuing after the highest existing one.
 DO $$
 BEGIN

@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use crate::{
     auth::AdminUser,
     error::{AppError, AppResult},
+    routes::orders::payment_in_flight,
     state::AppState,
     util::{JsonBody, parse_id, py_str, ts},
 };
@@ -71,12 +72,23 @@ pub async fn set_order_status(
     if !STATUSES.contains(&status.as_str()) {
         return Err(AppError::bad_request("invalid status"));
     }
-    let row: Option<(i32, Option<i32>, Option<String>)> =
+    let mut tx = s.pool.begin().await?;
+    let exists: Option<(i32,)> = sqlx::query_as("SELECT id FROM orders WHERE id = $1 FOR UPDATE")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    if exists.is_none() {
+        return Err(AppError::not_found());
+    }
+    if payment_in_flight(&mut tx, id).await? {
+        return Err(AppError::conflict("payment in progress"));
+    }
+    let (id, order_no, status): (i32, Option<i32>, Option<String>) =
         sqlx::query_as("UPDATE orders SET status = $1 WHERE id = $2 RETURNING id, order_no, status")
             .bind(&status)
             .bind(id)
-            .fetch_optional(&s.pool)
+            .fetch_one(&mut *tx)
             .await?;
-    let (id, order_no, status) = row.ok_or_else(AppError::not_found)?;
+    tx.commit().await?;
     Ok(Json(json!({ "id": id, "order_no": order_no, "status": status })))
 }

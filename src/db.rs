@@ -157,7 +157,10 @@ pub async fn export_sales_plain(pool: &PgPool, out: &str) -> Result<usize, Box<d
         text.push_str(&format!(
             "{},{},{},{}\n",
             no.map(|v| v.to_string()).unwrap_or_else(none),
-            status.clone().unwrap_or_else(none),
+            status
+                .as_deref()
+                .map(crate::routes::reports::neutralize)
+                .unwrap_or_else(none),
             total.map(py_float).unwrap_or_else(none),
             created.clone().unwrap_or_else(none),
         ));

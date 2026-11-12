@@ -8,4 +8,6 @@ CREATE INDEX IF NOT EXISTS orders_created_at_idx ON orders (created_at);
 CREATE INDEX IF NOT EXISTS order_items_order_id_idx ON order_items (order_id);
 CREATE INDEX IF NOT EXISTS payments_order_id_idx ON payments (order_id);
 CREATE INDEX IF NOT EXISTS products_sku_idx ON products (sku);
-CREATE INDEX IF NOT EXISTS sessions_user_id_idx ON sessions (user_id)
+CREATE INDEX IF NOT EXISTS sessions_user_id_idx ON sessions (user_id);
+CREATE INDEX IF NOT EXISTS login_failures_idx ON login_failures (username, failed_at);
+CREATE INDEX IF NOT EXISTS payments_pending_idx ON payments (order_id) WHERE status = 'pending'

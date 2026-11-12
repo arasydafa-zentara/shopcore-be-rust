@@ -44,11 +44,11 @@ Same commands as `manage.py`, available three ways inside the container:
 docker compose exec app manage init-db | seed | purge-sessions
 docker compose exec app manage import-products <csv>
 docker compose exec app manage export-sales <file>
-docker compose exec app ./manage.py seed          # shell wrapper, same thing
+docker compose exec app python manage.py seed     # launcher, same thing
 docker compose exec app shopcore manage seed
 ```
 
-(`manage.py` is a shell wrapper around the binary: the image contains no Python.)
+(`manage.py` is a small launcher that execs the Rust binary; the service itself contains no Python.)
 
 ## Database
 
@@ -70,7 +70,7 @@ Security (all were reachable by any caller):
 - Any logged-in user could read, cancel or refund any order and read its invoice. Now only the owner or an admin;
   everybody else gets `404`.
 - `/api/admin/users` returned password hashes; removed. Errors no longer include stack traces.
-- Passwords: new hashes are argon2id; legacy MD5 hashes still verify and are upgraded on the next login.
+- Passwords: new hashes are argon2id; legacy MD5 hashes still verify and are upgraded on the next login. Failed logins are throttled.
 - Sessions are random 256-bit tokens stored hashed in the database: `logout` and `purge-sessions` really revoke them,
   and they survive a restart (30 day lifetime).
 - The in-memory audit log that kept every request body (including passwords) forever is gone.
@@ -85,7 +85,8 @@ Money and consistency (all concurrency bugs in the legacy read-modify-write code
   cancelled order; invalid amount `400`, nothing left `409`.
 - Bank payment: one charge per order. The charge is retried on failure but every attempt carries the same
   `Idempotency-Key`, so the bank records it once (the legacy retries created duplicate charges). The call has a timeout and is
-  made outside any database transaction. If the settlement webhook arrives before the payment row is written the payment is stored as settled.
+  made outside any database transaction, after the order has been claimed by a pending payment row. If the settlement webhook arrives
+  first the payment is stored as settled.
 
 Spec conformance:
 - Invalid `sort`, `group_by`, admin `role` and order `status` values are `400` (legacy: SQL error `500` or silently accepted).
@@ -100,9 +101,21 @@ always refused, the connection is pinned to the addresses that were validated. P
 `NOTIFY_BLOCK_PRIVATE=true` (default off to stay compatible with the legacy behavior and local receivers). Events of one order are
 delivered in order (pending, then paid). E-mails were never delivered in the legacy service (an unread in-memory list); they are logged only.
 
-## Known limits / future work
+## Operational notes
 
-- Timestamps are rendered like Flask did (`Thu, 12 Nov 2026 10:00:00 GMT`, a naive Jakarta wall-clock value for orders).
-- A narrow race remains if an order is cancelled between the bank charge and the payment commit (the charge then needs manual reversal).
-- No rate limiting on login; CSV export does not neutralise spreadsheet formulas.
-- Not done: `cargo vendor` for fully offline builds, a differential test harness against the legacy service.
+- **Offline build.** All crates are vendored in `vendor/` (filtered to Linux x86_64 / aarch64 with `cargo vendor-filterer`) and the
+  Docker build runs `cargo build --offline --locked`; the runtime image (`python:3.13-slim`) needs no package install. Verified with
+  `docker build --network none --no-cache .`. To refresh: `cargo vendor-filterer --platform=x86_64-unknown-linux-gnu
+  --platform=aarch64-unknown-linux-gnu --exclude-crate-path '*#tests' --exclude-crate-path '*#benches' vendor`.
+- **One TLS backend.** rustls with the `ring` provider for both Postgres (`sslmode=require` works) and outgoing HTTPS.
+- **Payment states.** `payments.status` is `pending` (bank charge in flight), `captured`, `settled`, or `failed`. While a payment is
+  pending the order cannot be cancelled, moved by an admin or paid a second time (`409 payment in progress`), so a customer is never
+  charged for an order that no longer exists. A pending row older than two minutes (a crashed request) is retired automatically.
+- **Login throttle.** 10 failed attempts for a username within 60 s are answered with `429` until the window passes
+  (table `login_failures`; a successful login clears it). Other usernames are unaffected.
+- **CSV exports** prefix text cells that start with `= + - @` with an apostrophe, so spreadsheets do not evaluate them.
+- **Timestamps** keep the legacy rendering (`Thu, 12 Nov 2026 10:00:00 GMT`; order times are Jakarta wall-clock values).
+- **`manage.py`** is a tiny launcher that execs the Rust binary, so `python manage.py seed`, `./manage.py seed`, `manage seed` and
+  `shopcore manage seed` all work.
+- **Differential check.** `tools/differential.py <legacy-url> <rust-url>` replays one scenario against both services and lists every
+  difference; the remaining ones are the deliberate changes documented above.

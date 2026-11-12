@@ -1,0 +1,6 @@
+# Used only by the Docker build: resolve every crate from ./vendor, no network needed.
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "/src/vendor"

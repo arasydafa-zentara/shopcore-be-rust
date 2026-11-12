@@ -71,7 +71,17 @@ fn safe_name(name: &str) -> bool {
     !name.is_empty() && name.len() <= 200 && name != "." && name != ".." && !name.contains(['/', '\\', '\0'])
 }
 
-fn csv_field(s: &str) -> String {
+/// Spreadsheet formula guard: a text cell that starts with `= + - @` (or a control character) would be
+/// evaluated by Excel/Sheets, so it is prefixed with an apostrophe.
+pub fn neutralize(s: &str) -> String {
+    if s.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+        format!("'{s}")
+    } else {
+        s.to_string()
+    }
+}
+
+pub fn csv_field(s: &str) -> String {
     if s.contains([',', '"', '\n', '\r']) {
         format!("\"{}\"", s.replace('"', "\"\""))
     } else {
@@ -133,9 +143,9 @@ pub async fn export(State(s): State<AppState>, _a: AdminUser, JsonBody(data): Js
                 .map(|v| v.to_string())
                 .unwrap_or_else(none),
             g(1).unwrap_or_else(none),
-            g(2).unwrap_or_else(none),
-            g(3).unwrap_or_else(none),
-            g(4).unwrap_or_else(none),
+            g(2).map(|v| neutralize(&v)).unwrap_or_else(none),
+            g(3).map(|v| neutralize(&v)).unwrap_or_else(none),
+            g(4).map(|v| neutralize(&v)).unwrap_or_else(none),
             row.try_get::<Option<i32>, _>(5)
                 .ok()
                 .flatten()
@@ -206,6 +216,13 @@ mod tests {
         assert!(!safe_name(".."));
         assert!(!safe_name("a\\b"));
         assert!(!safe_name(""));
+    }
+
+    #[test]
+    fn formulas_are_neutralized() {
+        assert_eq!(neutralize("=SUM(A1)"), "'=SUM(A1)");
+        assert_eq!(neutralize("@cmd"), "'@cmd");
+        assert_eq!(neutralize("Keyboard"), "Keyboard");
     }
 
     #[test]

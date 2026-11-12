@@ -1,0 +1,28 @@
+[dependencies.cfg-if]
+version = "1"
+
+[lib]
+path = "src/lib.rs"
+
+[package]
+autobenches = false
+autobins = false
+autoexamples = false
+autolib = false
+autotests = false
+categories = ["config"]
+description = "An unopinionated library for obtaining configuration, data, cache, & other directories"
+documentation = "https://docs.rs/etcetera"
+edition = "2024"
+homepage = "https://github.com/lunacookies/etcetera"
+keywords = ["xdg", "dirs", "directories", "basedir", "path"]
+license = "MIT OR Apache-2.0"
+name = "etcetera"
+readme = "README.md"
+repository = "https://github.com/lunacookies/etcetera"
+rust-version = "1.87.0"
+version = "0.11.0"
+
+[target."cfg(windows)".dependencies.windows-sys]
+features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell"]
+version = "0.61"

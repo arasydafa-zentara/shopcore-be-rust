@@ -97,6 +97,20 @@ async fn visible_order(s: &AppState, user: &AuthUser, id: i32) -> AppResult<Orde
     }
 }
 
+/// True while a bank charge for this order is being processed (a `pending` payment row younger than two
+/// minutes; the bank call itself is capped well below that). While it is true the order must not be
+/// cancelled or otherwise moved, so a customer is never charged for an order that no longer exists.
+pub async fn payment_in_flight(conn: &mut PgConnection, order_id: i32) -> Result<bool, sqlx::Error> {
+    let (busy,): (bool,) = sqlx::query_as(
+        "SELECT EXISTS (SELECT 1 FROM payments WHERE order_id = $1 AND status = 'pending' \
+         AND created_at > now()::timestamp - interval '2 minutes')",
+    )
+    .bind(order_id)
+    .fetch_one(conn)
+    .await?;
+    Ok(busy)
+}
+
 pub async fn credit_wallet(conn: &mut PgConnection, user_id: Option<i32>, amount: f64) -> Result<(), sqlx::Error> {
     sqlx::query(
         "UPDATE users SET wallet_balance = ROUND((COALESCE(wallet_balance, 0) + $1)::numeric, 2)::float8 WHERE id = $2",
@@ -313,6 +327,9 @@ pub async fn cancel(State(s): State<AppState>, user: AuthUser, Path(id): Path<St
     };
     if status.as_deref() == Some("cancelled") {
         return Err(AppError::conflict("already cancelled"));
+    }
+    if payment_in_flight(&mut tx, id).await? {
+        return Err(AppError::conflict("payment in progress"));
     }
     sqlx::query(
         "UPDATE products p SET stock = COALESCE(p.stock, 0) + r.q FROM \

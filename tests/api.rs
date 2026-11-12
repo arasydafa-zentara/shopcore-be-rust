@@ -4,11 +4,21 @@
 use reqwest::{Client, Response};
 use serde_json::{Value, json};
 
+fn tls() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
+fn client() -> Client {
+    tls();
+    Client::new()
+}
+
 fn base() -> String {
     std::env::var("BASE_URL").unwrap_or_else(|_| "http://localhost:8000".into())
 }
 
 async fn up(c: &Client) -> bool {
+    tls();
     let ok = c
         .get(format!("{}/health", base()))
         .send()
@@ -94,7 +104,7 @@ async fn product(c: &Client, adm: &str, price: f64, stock: i64) -> i64 {
 
 #[tokio::test]
 async fn admin_routes_fail_closed_and_errors_are_json() {
-    let c = Client::new();
+    let c = client();
     if !up(&c).await {
         return;
     }
@@ -112,7 +122,7 @@ async fn admin_routes_fail_closed_and_errors_are_json() {
 
 #[tokio::test]
 async fn injection_and_traversal_are_rejected() {
-    let c = Client::new();
+    let c = client();
     if !up(&c).await {
         return;
     }
@@ -165,7 +175,7 @@ async fn injection_and_traversal_are_rejected() {
 
 #[tokio::test]
 async fn stock_is_never_oversold_under_concurrency() {
-    let c = Client::new();
+    let c = client();
     if !up(&c).await {
         return;
     }
@@ -203,7 +213,7 @@ async fn stock_is_never_oversold_under_concurrency() {
 
 #[tokio::test]
 async fn wallet_cannot_be_double_spent_and_refunds_are_capped() {
-    let c = Client::new();
+    let c = client();
     if !up(&c).await {
         return;
     }
@@ -314,7 +324,7 @@ async fn wallet_cannot_be_double_spent_and_refunds_are_capped() {
 
 #[tokio::test]
 async fn orders_are_private_and_bad_amounts_rejected() {
-    let c = Client::new();
+    let c = client();
     if !up(&c).await {
         return;
     }
