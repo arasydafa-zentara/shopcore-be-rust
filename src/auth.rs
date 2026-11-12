@@ -117,6 +117,7 @@ impl FromRequestParts<AppState> for AuthUser {
 }
 
 /// Admin-only routes: no/invalid token -> 401, valid non-admin -> 403 (legacy let anonymous callers through).
+#[allow(dead_code)]
 pub struct AdminUser(pub AuthUser);
 
 impl FromRequestParts<AppState> for AdminUser {
