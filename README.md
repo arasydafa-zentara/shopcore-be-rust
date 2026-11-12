@@ -117,5 +117,7 @@ delivered in order (pending, then paid). E-mails were never delivered in the leg
 - **Timestamps** keep the legacy rendering (`Thu, 12 Nov 2026 10:00:00 GMT`; order times are Jakarta wall-clock values).
 - **`manage.py`** is a tiny launcher that execs the Rust binary, so `python manage.py seed`, `./manage.py seed`, `manage seed` and
   `shopcore manage seed` all work.
-- **Differential check.** `tools/differential.py <legacy-url> <rust-url>` replays one scenario against both services and lists every
-  difference; the remaining ones are the deliberate changes documented above.
+- **Differential check.** `tools/differential.py <legacy-url> <rust-url>` replays one 93-step scenario against both services and lists
+  every difference. Against the legacy service on fresh databases 76 steps are identical (payments, webhook, cancel, coupons, invoices,
+  exports, ...); the other 17 are exactly the deliberate changes listed above or their consequences (for example the legacy service
+  left three orphan `pending` orders behind after rejected requests, and refunded more than the order total).

@@ -11,7 +11,7 @@ import hashlib, hmac, json, sys, uuid
 
 import requests
 
-VOLATILE = {"token", "created_at", "id", "order_no", "user_id", "order_id", "bank_ref", "username", "email", "name", "trace"}
+VOLATILE = {"token", "created_at", "id", "order_no", "user_id", "order_id", "bank_ref", "username", "email", "name", "trace", "file"}
 SECRET = b"bank-shared-secret-2019"
 
 
@@ -76,7 +76,7 @@ def scenario(c):
         c.call("products " + q, "GET", "/api/products" + q)
     c.call("product 1", "GET", "/api/products/1"); c.call("product 99999", "GET", "/api/products/99999")
     c.call("product create (user)", "POST", "/api/products", ta, json={"sku": "x", "name": "x", "price": 1, "stock": 1})
-    p = c.call("product create (admin)", "POST", "/api/products", adm, json={"sku": "T" + tag, "name": "Widget " + tag, "price": 12.5, "stock": 5}).json()
+    p = c.call("product create (admin)", "POST", "/api/products", adm, json={"sku": "TWIDGET", "name": "Widget", "price": 12.5, "stock": 500}).json()
     pid = p.get("id")
     c.call("product update", "PUT", "/api/products/%s" % pid, adm, json={"price": "15.25"})
     c.call("product update 404", "PUT", "/api/products/999999", adm, json={"price": 1})

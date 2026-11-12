@@ -375,3 +375,178 @@ async fn orders_are_private_and_bad_amounts_rejected() {
         400
     );
 }
+
+#[tokio::test]
+async fn failed_logins_are_throttled_per_username() {
+    let c = client();
+    if !up(&c).await {
+        return;
+    }
+    let (_, _) = user(&c).await;
+    let name = format!("nobody_{}", rand::random::<u32>());
+    let mut codes = Vec::new();
+    for _ in 0..12 {
+        codes.push(
+            call(
+                &c,
+                "POST",
+                "/api/login",
+                None,
+                Some(json!({"username": name, "password": "x"})),
+            )
+            .await
+            .status()
+            .as_u16(),
+        );
+    }
+    assert_eq!(&codes[..10], &[401; 10]);
+    assert_eq!(codes[10], 429);
+    // other accounts are not affected
+    assert_eq!(
+        call(
+            &c,
+            "POST",
+            "/api/login",
+            None,
+            Some(json!({"username": "admin", "password": "admin123"}))
+        )
+        .await
+        .status(),
+        200
+    );
+}
+
+#[tokio::test]
+async fn spreadsheet_formulas_are_neutralized_in_exports() {
+    use std::io::Read;
+    let c = client();
+    if !up(&c).await {
+        return;
+    }
+    let adm = admin(&c).await;
+    let p: Value = call(
+        &c,
+        "POST",
+        "/api/products",
+        Some(&adm),
+        Some(json!({"sku": "F1", "name": "=HYPERLINK(1)", "price": 1, "stock": 5})),
+    )
+    .await
+    .json()
+    .await
+    .unwrap();
+    let (_, tok) = user(&c).await;
+    call(
+        &c,
+        "POST",
+        "/api/orders",
+        Some(&tok),
+        Some(json!({"items": [{"product_id": p["id"], "quantity": 1}]})),
+    )
+    .await;
+    let file = format!("t{}.csv", rand::random::<u32>());
+    call(
+        &c,
+        "POST",
+        "/api/reports/export",
+        Some(&adm),
+        Some(json!({"filename": file})),
+    )
+    .await;
+    let bytes = call(
+        &c,
+        "GET",
+        &format!("/api/reports/download?file={file}.gz"),
+        Some(&adm),
+        None,
+    )
+    .await
+    .bytes()
+    .await
+    .unwrap();
+    let mut text = String::new();
+    flate2::read::GzDecoder::new(&bytes[..])
+        .read_to_string(&mut text)
+        .unwrap();
+    assert!(text.contains("'=HYPERLINK(1)"), "{text}");
+    assert!(!text.contains(",=HYPERLINK"));
+}
+
+#[tokio::test]
+async fn order_cannot_be_cancelled_while_a_bank_payment_is_in_flight() {
+    let c = client();
+    if !up(&c).await {
+        return;
+    }
+    let bank = std::env::var("BANK_ADMIN_URL").unwrap_or_else(|_| "http://localhost:5001".into());
+    if c.post(format!("{bank}/config"))
+        .json(&json!({"latency_ms": 1500, "drop_rate": 0}))
+        .send()
+        .await
+        .is_err()
+    {
+        eprintln!("SKIPPED: bank simulator not reachable at {bank}");
+        return;
+    }
+    let adm = admin(&c).await;
+    let pid = product(&c, &adm, 10.0, 10).await;
+    let (_, tok) = user(&c).await;
+    let o: Value = call(
+        &c,
+        "POST",
+        "/api/orders",
+        Some(&tok),
+        Some(json!({"items": [{"product_id": pid, "quantity": 1}]})),
+    )
+    .await
+    .json()
+    .await
+    .unwrap();
+    let id = o["id"].as_i64().unwrap();
+    let paying = {
+        let (c, tok) = (c.clone(), tok.clone());
+        tokio::spawn(async move {
+            call(
+                &c,
+                "POST",
+                &format!("/api/orders/{id}/pay"),
+                Some(&tok),
+                Some(json!({"method": "bank"})),
+            )
+            .await
+            .status()
+            .as_u16()
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert_eq!(
+        call(&c, "POST", &format!("/api/orders/{id}/cancel"), Some(&tok), None)
+            .await
+            .status(),
+        409
+    );
+    assert_eq!(
+        call(
+            &c,
+            "POST",
+            &format!("/api/orders/{id}/pay"),
+            Some(&tok),
+            Some(json!({"method": "bank"}))
+        )
+        .await
+        .status(),
+        409
+    );
+    assert_eq!(paying.await.unwrap(), 200);
+    let o: Value = call(&c, "GET", &format!("/api/orders/{id}"), Some(&tok), None)
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(o["status"], "paid");
+    let _ = c
+        .post(format!("{bank}/config"))
+        .json(&json!({"latency_ms": 0}))
+        .send()
+        .await;
+}
